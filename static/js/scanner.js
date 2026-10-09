@@ -1729,7 +1729,7 @@ function renderStations(stations, tokenRequired) {
             <div class="station-meta">
                 <span class="hint">${station.captures} card${station.captures === 1 ? '' : 's'} · last ${escapeHtml(station.last_seen || 'never')}</span>
                 <button class="btn btn-small" onclick="undoStationAdd('${id}')" title="Take back the last card this station added">Undo last</button>
-                <button class="btn btn-small btn-danger" onclick="forgetStation('${id}')" title="Remove it from this list - its cards stay">Forget</button>
+                <button class="btn btn-small btn-danger" onclick="forgetStation('${id}')" title="Remove it from this list, with its scanned cards and review cards">Forget</button>
             </div>
         </div>`;
     }).join('') : '<div class="hint">No station has sent a card yet.</div>';
@@ -1757,13 +1757,18 @@ function undoStationAdd(id) {
 async function forgetStation(id) {
     const ok = await confirmDialog({
         title: 'Forget this station?',
-        message: 'It is removed from this list. The cards it sent stay, and it comes back if it sends another one.',
-        confirmText: 'Forget',
+        message: 'It is removed from this list, with the cards it scanned that are not in the collection yet and the cards it has waiting for review. Cards already in the collection stay. It comes back, empty, if it connects or sends a card again.',
+        confirmText: 'Forget and delete its cards',
         danger: true
     });
     if (!ok) return;
     fetch('/api/stations/' + encodeURIComponent(id), {method: 'DELETE'})
-        .then(() => loadStations())
+        .then(response => response.json())
+        .then(data => {
+            if (!data.success) throw new Error(data.message);
+            notify(`Station forgotten: ${data.cards} scanned cards and ${data.reviews} review cards removed`, 'success');
+            loadStations();
+        })
         .catch(error => notify('Could not forget the station: ' + error.message, 'error'));
 }
 

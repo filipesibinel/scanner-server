@@ -907,7 +907,9 @@ afterwards). Errors: `400` (bad id, no readable picture), `401` (token), `413` (
 - **Undo**: `POST /api/stations/<id>/undo` takes back that station's last automatic add
   (`InventoryManager.last_added` is kept per source; the scanner page's own Undo is source
   `None`). Answered to the pages as `inventory_updated` with `station` and `undone`.
-- `GET /api/stations` lists them; `DELETE /api/stations/<id>` forgets one (its cards stay).
+- `GET /api/stations` lists them; `DELETE /api/stations/<id>` forgets one - after clearing its
+  scanned cards and review items (`clear_camera`, every game), so nothing of it is left where
+  no page shows it. Cards already moved to the collection stay.
 - **The Android app** is such a station in its client mode (`../mtg-scanner-android`,
   `server/ScannerServer.kt`): it uploads each capture with a `capture_id`, shows the answer,
   asks again while it is pending and uses the undo endpoint. Change the answer's fields and

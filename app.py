@@ -1265,6 +1265,26 @@ def import_inventory():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+def clear_camera(game, camera):
+    """
+    A camera starts over: the cards it scanned (not yet in the collection) go, and the cards it
+    has waiting for review. Returns (clear_inventory's result, review items removed).
+    """
+    result = scan_inventory.clear_inventory(game.id, station=camera)
+    if not result['success']:
+        return result, 0
+    reviews = review.clear(game.id, camera)
+    with in_desk(desk_for(camera)):
+        if desk().current_review_id is not None:  # its page had one open
+            desk().current_review_id = desk().review_sid = desk().current_card_info = None
+            set_pending_capture(None)
+            emit_desk('review_item', {'id': None, 'total': 0})
+        emit_desk('review_queue_update', {'count': 0})
+        if reviews:
+            log_to_client(f"Scanned cards cleared: {reviews} card(s) removed from the review queue too", level="warning")
+    return result, reviews
+
+
 @app.route('/api/clear_inventory', methods=['POST', 'DELETE'])
 def clear_inventory():
     """Clear all cards from inventory - of the scanned cards with ?camera=<station id>, only that camera's"""
@@ -1274,22 +1294,12 @@ def clear_inventory():
     try:
         camera = scan_camera() if inventory_area() is scan_inventory else None
         game = games.active()
-        result = inventory_area().clear_inventory(game.id, station=camera)
+        if camera:
+            result, reviews = clear_camera(game, camera)
+        else:
+            result, reviews = inventory_area().clear_inventory(game.id), 0
 
         if result['success']:
-            reviews = 0
-            if camera:
-                # That camera starts over: the cards it has waiting for review go too
-                reviews = review.clear(game.id, camera)
-                with in_desk(desk_for(camera)):
-                    if desk().current_review_id is not None:  # its page had one open
-                        desk().current_review_id = desk().review_sid = desk().current_card_info = None
-                        set_pending_capture(None)
-                        emit_desk('review_item', {'id': None, 'total': 0})
-                    emit_desk('review_queue_update', {'count': 0})
-                    if reviews:
-                        log_to_client(f"Scanned cards cleared: {reviews} card(s) removed from the review queue too",
-                                      level="warning")
             if inventory_area() is scan_inventory:
                 # Every scanner page counts the scanned cards (its camera's, or everyone's)
                 socketio.emit('inventory_updated', {'auto': False, 'cleared': True}, namespace='/')
@@ -1964,10 +1974,23 @@ def station_list():
 def station_item(station_id):
     """Rename a station, set the location its cards are put in, or forget it"""
     if request.method == 'DELETE':
+        if stations.get(station_id) is None:
+            return jsonify({'success': False, 'message': 'No such station'}), 404
+        # Nothing of it is left behind where no page would show it: its scanned cards (not yet
+        # in the collection) and its review items go first, in every game
+        cards = reviews = 0
+        for game in games.all_games():
+            result, removed = clear_camera(game, station_id)
+            if not result['success']:
+                return jsonify({'success': False, 'message': result.get('error') or 'Could not clear its cards'}), 500
+            cards, reviews = cards + result['deleted'], reviews + removed
         with desks_lock:
             desks.pop(station_id, None)
-        return (jsonify({'success': True}) if stations.remove(station_id)
-                else (jsonify({'success': False, 'message': 'No such station'}), 404))
+        camera_hub.forget(station_id)
+        stations.remove(station_id)
+        socketio.emit('inventory_updated', {'auto': False, 'cleared': True}, namespace='/')
+        logger.info(f"Station {station_id} forgotten: {cards} scanned cards and {reviews} review items removed")
+        return jsonify({'success': True, 'cards': cards, 'reviews': reviews})
     data = request.get_json(silent=True) or {}
     station = stations.update(station_id, name=data.get('name'), location=data.get('location'))
     if station is None:
