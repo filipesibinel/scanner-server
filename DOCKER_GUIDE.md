@@ -220,8 +220,10 @@ in its service).
 **A second camera.** Repeat Part 2 on another machine. Each camera gets its own page with its
 own review list; the scanned cards are one list that can be narrowed to one camera.
 
-**A phone as a camera.** The Android app, with *Send cards to a scanner server* turned on in
-its Settings and the server's address.
+**A phone as a camera.** The [Android app](https://github.com/filipesibinel/mtg-scanner-android),
+with *Send cards to a scanner server* turned on in its Settings and this server's address. Its
+[install guide](https://github.com/filipesibinel/mtg-scanner-android/blob/main/INSTALL_GUIDE.md)
+goes through it step by step: downloading the app, mounting the phone, and the first scan.
 
 **Lock out other devices.** Anyone on your network can open the pages. To at least require a
 password from cameras, put `SCANNER_STATION_TOKEN=<something long>` in a `.env` file beside the
