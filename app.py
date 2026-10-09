@@ -257,6 +257,7 @@ capture_outcomes = collections.OrderedDict()
 # Captures by the id their sender gave them, so one sent twice (no answer the first time) is
 # one capture: {capture id: (station id, capture number)}
 seen_captures = collections.OrderedDict()
+capture_accept_lock = threading.Lock()  # station_capture: is this capture known? - no: it is now
 capture_outcomes_lock = threading.Lock()
 debug_mode_running = Config.DEBUG  # Flask's debug mode as this process was started (main)
 database = None
@@ -437,6 +438,15 @@ def set_pending_capture(image_path):
     desk().pending_capture = str(image_path) if image_path else None
 
 
+# The capture whose result this thread is applying (submit_capture): its uid (pending.py), which
+# the add / the review item notes in its own commit - read again after a crash, it counts once
+settling = threading.local()
+
+
+def capture_key():
+    return getattr(settling, 'uid', None)
+
+
 def queue_for_review(game, image_path, name='', number='', set_code='', foil='unknown', card=None, why=None,
                      station=None):
     """
@@ -444,7 +454,7 @@ def queue_for_review(game, image_path, name='', number='', set_code='', foil='un
     station: the stations.py station it came from (None: the scanner page's camera).
     Returns why it was queued.
     """
-    review.add(game.id, image_path, name, number, set_code, foil, card, station=desk().id)
+    review.add(game.id, image_path, name, number, set_code, foil, card, station=desk().id, capture_key=capture_key())
     if card:
         why = why or 'printing not confirmed'
         what = f"{card['name']} ({why})"
@@ -479,7 +489,7 @@ def route_identified(image_path, card_name, collector_number, set_code, processi
         # The game was switched while this capture waited for (or was with) the AI: it is not
         # looked up as a card of the other game - it waits in its own game's review queue,
         # without what was read (the prompt and parser may have been the other game's)
-        review.add(game_id, image_path, foil=foil, station=desk().id)
+        review.add(game_id, image_path, foil=foil, station=desk().id, capture_key=capture_key())
         log_to_client(f"{station_prefix(station)}Captured before the game was switched: kept in the "
                       f"{games.get(game_id).label} review queue", level="warning")
         if scanner:
@@ -533,7 +543,7 @@ def add_automatically(game, card, image_path, foil, station=None, captured_at=No
     finish = game.suggested_finish(card, foil)
     row_id = scan_inventory.add_card(game.inventory_fields(card, finish), game.id, finish, 'Near Mint', 1,
                                      capture=image_path, location=scan_location(), when=captured_at,
-                                     source=desk().id)
+                                     source=desk().id, capture_key=capture_key())
     added = added_payload(game, card, finish, 1)
     emit_desk('inventory_updated', {'auto': True, 'stats': scan_stats(game.id), 'added': added})
     start_price_update(game, card, [row_id])
@@ -654,39 +664,47 @@ def foil_file(image_path):
 
 
 def submit_capture(image_path, image, foil_image, number, game_id, station=None, captured_at=None, on_outcome=None,
-                   foil_path=None, pending_id=None, outcome_key=None, capture_id=None):
+                   foil_path=None, pending_id=None, outcome_key=None, capture_id=None, uid=None):
     """
     Queue a saved capture to be read (identification.py) and then added or queued for review,
     as when adding automatically. It is on record (pending.py) until it is settled, so a
     restart picks it up again.
     foil_path: the file of foil_image when that is another picture than the card image;
     on_outcome(outcome): called with route_identified's outcome ('seconds' added);
-    pending_id: the capture is on record already (resume_pending);
+    pending_id, uid: the capture is on record already (resume_pending) - its row and its uid;
     outcome_key: (uploading station's id, capture number) to remember the outcome under;
     capture_id: the uploader's own id for the capture (see seen_captures)
     """
     captured_at = captured_at or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     owner = desk()  # the capture's desk: its pages get the log lines and the outcome
     if pending_id is None:
-        pending_id = pending.add(game_id, station['id'] if station else None, number, Path(image_path).name,
-                                 Path(foil_path).name if foil_path else None, foil_image is image, captured_at,
-                                 capture_id=capture_id, sender=outcome_key[0] if outcome_key else None)
+        pending_id, uid = pending.add(game_id, station['id'] if station else None, number, Path(image_path).name,
+                                      Path(foil_path).name if foil_path else None, foil_image is image, captured_at,
+                                      capture_id=capture_id, sender=outcome_key[0] if outcome_key else None)
     queue_changed(+1)
 
     def identified(card_info, seconds):
         with in_desk(owner):
+            kept = False
             try:
+                settling.uid = uid  # the add / review item notes it: applied once, whatever is read again
                 outcome = announce_and_route(image_path, card_info, number, game_id, seconds, fast=True,
                                              station=station, captured_at=captured_at)
                 outcome['seconds'] = round(seconds, 2)
+                pending.settle(pending_id, outcome)  # off the queue, its outcome on record
             except Exception as e:
-                # Off the record all the same: queued again at every start, it would fail every time
                 logger.exception(f"Capture {Path(image_path).name} could not be added or queued for review: {e}")
                 log_to_client(f"{station_prefix(station)}Capture {Path(image_path).name} failed: {e}", level="error")
                 outcome = {'status': 'error', 'message': str(e)}
+                # Stays on record for the next starts (a few times: an error that never goes
+                # away must not come back at every start for ever)
+                try:
+                    kept = pending.fail(pending_id, e, outcome)
+                except Exception as error:
+                    logger.error(f"Capture {Path(image_path).name}: its failure could not be recorded: {error}")
             finally:
-                pending.remove(pending_id)
-                if foil_path:
+                settling.uid = None
+                if foil_path and not kept:
                     Path(foil_path).unlink(missing_ok=True)
                 queue_changed(-1)
         if outcome_key:
@@ -728,7 +746,7 @@ def resume_pending():
             seen_captures[row['capture_id']] = outcome_key
         with in_desk(desk_for(row['station']) if row['station'] else None):
             submit_capture(image_path, image, foil_image, row['number'], row['game'], station, row['captured_at'],
-                           foil_path=foil_path, pending_id=row['id'], outcome_key=outcome_key)
+                           foil_path=foil_path, pending_id=row['id'], outcome_key=outcome_key, uid=row['uid'])
 
 
 def initialize_components():
@@ -1684,7 +1702,10 @@ def deck_import(deck_id):
     if not entries:
         return jsonify({'success': False, 'error': 'No cards found'}), 400
     resolved, unknown = resolve_entries(game, entries, deck['format'])
-    added = deck_store.import_cards(deck_id, resolved, replace=bool(data.get('replace')))
+    try:
+        added = deck_store.import_cards(deck_id, resolved, replace=bool(data.get('replace')))
+    except ValueError as e:  # refused as a whole: the deck is as it was
+        return jsonify({'success': False, 'error': str(e)}), 400
     return jsonify({'success': True, 'added': added, 'unknown': unknown,
                     'deck': deck_payload(deck_store.get(deck_id))})
 
@@ -2152,19 +2173,27 @@ def station_capture(station_id):
 
     # Sent before? (the station got no answer and tries again): the same capture, not a new one
     capture_id = (request.form.get('capture_id') or '')[:64] or None
-    with capture_outcomes_lock:
-        known = seen_captures.get(capture_id) if capture_id else None
+    # Asked and claimed in one step: the same capture arriving twice at once (a retry crossing
+    # its first upload) was two captures when the second asked before the first had claimed it
+    with capture_accept_lock:
+        with capture_outcomes_lock:
+            known = seen_captures.get(capture_id) if capture_id else None
+        settled = None if known else pending.settled(capture_id)
+        if not known and not settled:
+            station = stations.capture(station_id, request.form.get('name'))
+            number = station['captures']
+            key = (station_id, number)
+            if capture_id:
+                with capture_outcomes_lock:
+                    seen_captures[capture_id] = key
+                    while len(seen_captures) > 2000:
+                        seen_captures.popitem(last=False)
     if known:
         return capture_outcome_response(*known)
-
-    station = stations.capture(station_id, request.form.get('name'))
-    number = station['captures']
-    key = (station_id, number)
-    if capture_id:
-        with capture_outcomes_lock:
-            seen_captures[capture_id] = key
-            while len(seen_captures) > 2000:
-                seen_captures.popitem(last=False)
+    if settled:
+        # Settled before a restart (the list above is this run's): the same answer, no second card
+        outcome = settled[2]
+        return jsonify({'success': outcome.get('status') != 'error', 'capture': settled[1], **outcome})
     image_path = Config.IMAGES_DIR / f"{station_id}_{number}_{int(time.time())}.jpg"
     save_upload(image_path, data, image)
     game_id = games.active_id()
@@ -2209,6 +2238,9 @@ def capture_outcome_response(station_id, number):
         return jsonify({'success': outcome.get('status') != 'error', 'capture': number, **outcome})
     if pending.has(station_id, number):
         return jsonify({'success': True, 'capture': number, 'status': 'pending'}), 202
+    outcome = pending.outcome(station_id, number)  # settled before a restart
+    if outcome is not None:
+        return jsonify({'success': outcome.get('status') != 'error', 'capture': number, **outcome})
     return jsonify({'success': False, 'message': 'No such capture (outcomes are kept for the last few hundred)'}), 404
 
 

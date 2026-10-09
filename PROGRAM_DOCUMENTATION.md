@@ -86,14 +86,14 @@ inside `app.py` or inside `station_client.py`.
 | `prompts.py` | server | Built-in prompts and the ones edited in Settings (`data/prompts.json`), per model |
 | `stations.py` | server | The stations (`data/stations.json`): name, location, counters, and each one's settings (`StationSettings`) |
 | `remote_scanner.py` | server | `RemoteScanner`: what the server holds in place of a station's `CardScanner`; `CameraHub`: the `/station` Socket.IO namespace the clients connect to |
-| `pending.py` | server | Captures in the queues, on disk until settled (`data/pending_captures.db`) |
+| `pending.py` | server | Captures in the queues, on disk until settled, and what became of them (`data/pending_captures.db`); the `applied_captures` table the inventory and review queue note applied captures in |
 | `review.py` | server | The review queue (`review_queue` table, `data/review/`), per station |
 | `database.py` | server | Scryfall download and import, schema / migrations, searches, printing lookup, match confidence |
 | `games/` | server | Card games: `base.Game` (the interface the app uses), `mtg.Magic` (Scryfall data, matching, finishes, exports); `games.active()` is the game being scanned |
 | `card_search.py` | server | Magic search helpers combining name, number, set and treatment |
 | `inventory.py` | server | Inventory table for every game: schema + migration, add (merging duplicates), undo, edit / split, bulk edits, locations and tags, which station scanned what, move to the collection, CSV import / export |
 | `decks.py`, `games/mtg_decks.py` | server | Decks (`decks`, `deck_cards`): lists of card names; formats, deck checks, text decklists |
-| `recommendations.py` | server | Deck ideas from EDHREC, MTGJSON, Archidekt and Moxfield, cached in `web_cache` |
+| `recommendations.py` | server | Deck ideas from EDHREC, MTGJSON, Archidekt and Moxfield, cached in `data/web_cache.db` |
 | `backups.py` | server | Backups of the collection, the scanned cards and the decks |
 | `settings.py` | server | Choices made in the web interface, in `data/settings.json` |
 | `cleanup.py`, `setup_database.py` | server | Old capture images (on startup and as a CLI); downloading the card database |
@@ -247,12 +247,32 @@ afterwards). Errors: `400` (bad id, no readable picture), `401` (token), `413` (
 accepted until it is added or in the review queue; its image is in `scanned_cards/` (a
 separate foil image as `<name>_foil.jpg`, deleted afterwards). At startup `resume_pending`
 queues what is still on record. Measured 2026-10-08: container killed (`docker kill`) with 110
-captures on record; after the restart all were added, 120 cards for 119 accepted uploads. It is
-"at least once": the extra card is an upload recorded just before the kill whose answer never
-reached the sender, or a card added just before the kill and not yet taken off the record (then
-added again). A station that got no answer and sends the picture again would add the card
-twice too - which is what `capture_id` prevents (`seen_captures`, kept with the pending record
-across a restart).
+captures on record; after the restart all were added, 120 cards for 119 accepted uploads - the
+extra card was one added just before the kill and not yet taken off the record (then added
+again), which is what the next paragraph is about.
+
+**A capture counts once** (since 2026-10-09, after DATABASE_REVIEW.md):
+- Each capture on record has a `uid`. The add (`InventoryManager.add_card(capture_key=)`) or
+  the review item (`ReviewQueue.add(capture_key=)`) notes it in its own commit, in a table
+  `applied_captures` of the database it writes to; a capture read again after a crash between
+  that commit and its removal from the record finds its uid there and changes nothing.
+  `submit_capture` hands the uid down through `settling` (thread-local) / `capture_key()`.
+- What became of an uploaded capture is written to `settled_captures` (in
+  `pending_captures.db`) in the commit that takes it off the record (`PendingCaptures.settle`).
+  A station that sends the same `capture_id` again - also after a restart, when
+  `seen_captures` (this run's memory) is empty - gets that answer; asking and claiming a
+  `capture_id` is one step (`capture_accept_lock`), so two uploads of it at once are one capture.
+- A capture whose result could not be applied stays on record and is tried at the next starts,
+  three times in all (`PendingCaptures.fail`, `MAX_ATTEMPTS`); then it is settled as an error.
+- Applied uids and outcomes are kept 30 days (`KEEP_DAYS`). `applied_captures` is not part of a
+  backup and stays when cards move to the collection or a backup is restored.
+
+Verified 2026-10-09 on an isolated copy of the server (copies of the databases, another port):
+one upload sent twice, another sent twice at the same moment, the process killed (`kill -9`),
+the first capture put back on the record as a crash would leave it, restart - 2 cards for 2
+captures, and both repeats answered from the record. **Not tested**: a kill at exactly the
+moment between the two commits (the state was built by hand), and the clients' side - the
+station and the Android app still delete their picture on any answer below 500.
 
 Measured 2026-10-08 (server in Docker, OCR on an RTX 4070 Ti SUPER, a laptop on Wi-Fi sending
 recorded captures): one station at a card every 2.5 s - 30 of 30 added, 29 by OCR in 0.34 s
@@ -902,8 +922,11 @@ The app's own columns (`Card Name`, `Set`) → `import_csv`; CSVs written before
 file, or one where no card is found, is refused before "replace" deletes anything.
 
 **Imports never leave a half-filled table.** The download fills a staging table (`cards_import`), committing every 5,000 rows so the inventory can still write, and swap
-it in at the end in one step (`CardDatabase.replace_table`, under the database lock, then the
-indexes are rebuilt) - scanning keeps using the old data while an update runs.
+it in at the end in one transaction (`CardDatabase.replace_table`: `BEGIN IMMEDIATE`, drop,
+rename, indexes, the `card_data_info` row, commit - or all of it rolled back) - scanning keeps
+using the old data while an update runs. Before anything is touched the import is refused when
+its table is missing, empty, or holds less than half the cards in use (`MIN_SHARE`: a download
+cut short); the cards in use then stay. Only `cards` / `cards_import` are accepted (`CARD_TABLES`).
 
 **`card_data_info`** - per game: the source's own date (Scryfall's `updated_at`), when it was downloaded, and the card count.
 
@@ -1131,8 +1154,14 @@ decklists (`1 Sol Ring`, `4x Lightning Bolt (2X2) 117`, `Commander` / `Deck` / `
 sections, a blank line before the sideboard of a 60-card list) are read and written by
 `parse_decklist` / `format_decklist`.
 
-**Deck ideas from other sites** (`recommendations.py`). Every answer is cached in the
-`web_cache` table (EDHREC and the MTGJSON list 7 days, precon lists 90 days, deck searches and
+**Deck ideas from other sites** (`recommendations.py`). Every answer is cached in
+`data/web_cache.db` - its own file since 2026-10-09 (it was a table of the card database, 138 MB
+beside 91 MB of cards, and its writes shared the collection's file): compressed (the same 419
+answers are 37 MB), entries older than 90 days dropped, the oldest making room above 200 MB
+(`MAX_BYTES`), an answer above 8 MB not kept. The file can be deleted at any time and is in no
+backup; a cache that cannot be written only makes the next request slower. At the first start
+the old table's answers are copied over and the table dropped (the card database file does not
+shrink - its pages are used again). Cached: (EDHREC and the MTGJSON list 7 days, precon lists 90 days, deck searches and
 decks 1 day; a 403/404 is cached too), requests to one site are at least 1 s apart (MTGJSON
 0.25 s) with a 10 s timeout, and a site that fails or answers in another shape raises
 `Unavailable`: that panel says so and the rest works. Nothing here runs while scanning.
@@ -1229,9 +1258,10 @@ one game exists. Card payloads may carry `finish_options` (only those finishes a
 | `data/settings.json` | Choices made in the web interface that are everyone's: AI provider / model, OCR first, the game, automatic backups (`backup_every_hours`, `backup_keep`), sound on / off, the capture beep and the card-added ding each on / off (`sound_capture`, `sound_added`) and volume (`POST /api/sound`), debug mode (`debug_mode`: Flask's debugger, and every request in `data/logs/requests.log`; taken when the server starts, always without the reloader). Also the camera settings of a camera on the server itself - which a new station inherits until it has its own |
 | `data/stations.json` | The stations: name, location, capture count, last seen, `camera` (it connects as a camera station), and `settings` - each station's `focus_value`, `camera_rotation`, `refocus_every`, `fixed_area`, `fixed_area_enabled`, `debug_trace`, `auto_add` |
 | `data/prompts.json` | Prompt instructions edited in Settings, per game / kind / model (`prompts.py`) |
-| `data/cards_database.db` | Card data (`cards`, `card_data_info`), the collection (`inventory`, `inventory_captures`, `inventory_sources`), decks (`decks`, `deck_cards`), the review queue (`review_queue`) and answers cached from other sites (`web_cache`) |
+| `data/cards_database.db` | Card data (`cards`, `card_data_info`), the collection (`inventory`, `inventory_captures`, `inventory_sources`), decks (`decks`, `deck_cards`), the review queue (`review_queue`), and the captures already applied to it (`applied_captures`) |
+| `data/web_cache.db` | Answers cached from other sites (`recommendations.py`): disposable, not in backups |
 | `data/scan_inventory.db` | Cards scanned and not yet added to the collection (the same three inventory tables, and `pending_moves`) |
-| `data/pending_captures.db` | Captures waiting in the OCR / AI queues, queued again after a restart |
+| `data/pending_captures.db` | Captures waiting in the OCR / AI queues, queued again after a restart (`pending_captures`), and what became of uploaded ones (`settled_captures`, 30 days) |
 | `data/review/` | Captures waiting in the review queue (deleted when resolved) |
 | `data/captures/` | Thumbnails of the captures behind inventory entries (deleted with their entry) |
 | `data/backups/` | Backups (`<date_time>/`, see Backups); copies of the inventory table made before a migration rebuilds it (`inventory_before_*.db`) |

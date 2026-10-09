@@ -268,19 +268,49 @@ class CardDatabase:
                               (game, source_updated, datetime.now().isoformat(timespec='seconds'), card_count))
             self.conn.commit()
 
-    def replace_table(self, staging, table, create_indexes=None):
+    # replace_table: the card tables that may be replaced, and how much smaller than the table
+    # in use an import may be (a download cut short must not replace a complete catalog)
+    CARD_TABLES = {'cards': 'cards_import'}
+    MIN_SHARE = 0.5
+
+    def replace_table(self, staging, table, create_indexes=None, info=None):
         """
         Put a freshly filled staging table in place of a card table in one step, so searches
-        never see a half-imported table (imports fill `staging`, committing as they go)
+        never see a half-imported table (imports fill `staging`, committing as they go). One
+        transaction: the old table is dropped, the new one renamed and indexed and - with info:
+        (game, source_updated, card_count) - its card_data_info row written, or, when any of it
+        fails, everything stays as it was. Refused before anything is touched: a staging table
+        that is missing, empty, has repeated ids, or less than MIN_SHARE of the rows in use.
         """
+        if self.CARD_TABLES.get(table) != staging:
+            raise ValueError(f"Not a card table and its import table: {table}, {staging}")
         with self._lock:
             self.conn.commit()
+            one = lambda sql, *values: self.conn.execute(sql, values).fetchone()
+            exists = one("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", staging)
+            rows = one(f'SELECT COUNT(*), COUNT(DISTINCT id) FROM {staging}') if exists else (0, 0)
+            current = one(f'SELECT COUNT(*) FROM {table}')[0] if one(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", table) else 0
+            problem = (f'{staging} is missing' if not exists else f'{staging} is empty' if not rows[0]
+                       else 'card ids repeat' if rows[0] != rows[1]
+                       else f'only {rows[0]} cards, {current} are in use' if rows[0] < current * self.MIN_SHARE else None)
+            if problem:
+                logger.error(f"Card data import refused ({problem}): {table} is unchanged")
+                raise RuntimeError(f"The card data was not replaced: {problem}")
             cursor = self.conn.cursor()
-            cursor.execute(f'DROP TABLE IF EXISTS {table}')
-            cursor.execute(f'ALTER TABLE {staging} RENAME TO {table}')
-            if create_indexes:
-                create_indexes(cursor)
-            self.conn.commit()
+            cursor.execute('BEGIN IMMEDIATE')  # explicit: Python's sqlite3 does not open one for DROP / ALTER
+            try:
+                cursor.execute(f'DROP TABLE IF EXISTS {table}')
+                cursor.execute(f'ALTER TABLE {staging} RENAME TO {table}')
+                if create_indexes:
+                    create_indexes(cursor)
+                if info:
+                    cursor.execute('INSERT OR REPLACE INTO card_data_info VALUES (?, ?, ?, ?)',
+                                   (info[0], info[1], datetime.now().isoformat(timespec='seconds'), info[2]))
+                self.conn.commit()
+            except BaseException:
+                self.conn.rollback()
+                raise
 
     def fetch_scryfall_info(self):
         """Scryfall's bulk data description: download URL, size and updated_at"""
@@ -413,8 +443,9 @@ class CardDatabase:
                     progress_callback(f"Error inserting card {card.get('name')}: {e}")
                 continue
         
-        self.replace_table('cards_import', 'cards', self._create_card_indexes)
-        self.set_data_info('mtg', getattr(self, 'last_download_source', None), inserted)
+        # The new cards and what is known about them go in together (or neither)
+        self.replace_table('cards_import', 'cards', self._create_card_indexes,
+                           info=('mtg', getattr(self, 'last_download_source', None), inserted))
         if progress_callback:
             progress_callback(f"Database populated with {inserted} cards!")
         

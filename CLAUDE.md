@@ -63,7 +63,9 @@ Node.js 22+ and `npm install` in `ocr/`), `requirements-client.txt` (station). T
 this machine is Python 3.12 and has both.
 
 **Testing.** `tests/test_ownership.py` covers which station scanned what (splits, merges,
-moves, clears) and backups, on temporary databases. Nothing else is automated: verify changes
+moves, clears) and backups; `tests/test_database.py` the cases of DATABASE_REVIEW.md (failed
+writes rolled back, reads that do not write, captures that count once, the card data swap, the
+web cache) - all on temporary databases. Nothing else is automated: verify changes
 by running the programs, and for scanner logic by feeding recorded / synthetic frames through
 `CardScanner` with a fake camera (patch `detect_camera_type` / `_initialize_usb_camera`).
 **Never test against a server's real `data/`** (adds, clears, forgets, imports, load tests):
@@ -76,7 +78,7 @@ container - or a second container with its own data folder and port.
 |---|---|
 | **Server** | |
 | One desk per camera: whose card, review and events this is | `app.py`: `Desk`, `desk`, `desk_for`, `in_desk`, `at_station`, `emit_desk`, the `scanner` proxy, `make_remote_scanner`, `handle_connect` (`page_stations`) |
-| A station's capture arriving; kept until settled | `app.py`: `station_capture`, `submit_capture`, `resume_pending`, `capture_outcome_response`, `seen_captures`; `pending.py`: `PendingCaptures` (`data/pending_captures.db`) |
+| A station's capture arriving; kept until settled | `app.py`: `station_capture`, `submit_capture`, `resume_pending`, `capture_outcome_response`, `seen_captures`; `pending.py`: `PendingCaptures` (`settle`, `fail`, `settled`), `APPLIED_CAPTURES_TABLE` (`data/pending_captures.db`) |
 | Reading a card: OCR stage, AI stage, their queues and workers, AI provider / OCR switch | `identification.py`: `Identification` (`submit` → `_ocr_worker` → `_ai_worker` → `_done_worker`; `identify` in the caller's thread; `set_ai_provider`, `set_ocr_enabled`, `last_capture`) |
 | OCR reader process and parsers | `card_ocr.py`: `CardOcr`, `parse_magic`, `PARSERS`; `ocr/server.mjs` (Node.js); `Game.confirmed_read` |
 | AI providers, foil check, Ollama warm-up | `card_identifier.py`: `_ask_*`, `identify_card`, `read_foil_symbol`, `warm_up` |
@@ -131,8 +133,17 @@ container - or a second container with its own data folder and port.
   remembered, counted). Cards come back on `Identification`'s one results thread (`on_done`) -
   never route a card from the OCR / AI workers themselves. Station captures arrive on request
   threads, several at once.
-- **Uploads are "at least once".** `capture_id` makes a repeat the same capture; keep it when
-  touching `station_capture` or the clients' retry loops.
+- **Uploads are "at least once", a capture counts once.** `capture_id` makes a repeat the same
+  capture (`seen_captures`, and `settled_captures` across a restart); a capture's `uid` is noted
+  by whatever its result writes (`add_card(capture_key=)`, `review.add(capture_key=)`), in the
+  same commit. A new place a capture's result is written to must take `capture_key()` too. Keep
+  both when touching `station_capture`, `submit_capture` or the clients' retry loops.
+- **A change is whole or not at all.** Inventory methods that write are `@_writes` (rolled back
+  when they fail) and commit through `_commit()` (thumbnails of deleted captures go only then);
+  deck changes are inside `with self._writing()`. **Reads never write**: no DELETE / UPDATE in a
+  method that only returns rows - it leaves a write transaction open and other connections get
+  "database is locked". Entries are deleted together with `_drop_orphans()`; a quantity is
+  lowered together with `_trim_sources()` (before `_trim_captures`).
 - **Scanned cards and cameras.** Entries merge across cameras; who scanned what is beside them
   (`inventory_sources`, `inventory_captures.station`; `add_card(source=...)`). Anything that
   shows or moves "a camera's cards" goes through `_station_rows`; anything that moves copies
@@ -180,7 +191,8 @@ container - or a second container with its own data folder and port.
   and `keep_alive`; the parser accepts answers with or without `NAME:/NUMBER:/SET:` labels.
 - **Other sites** (`recommendations.py`): only MTGJSON is a published API. Go through `_get`
   (cache, 1 request/s per site), catch shape changes and raise `Unavailable`; never call these
-  from scanning code paths.
+  from scanning code paths. The cache is `data/web_cache.db`: disposable, bounded, in no backup -
+  nothing that must be kept goes into it.
 
 **Camera and detection** (the station)
 

@@ -10,7 +10,13 @@ Only MTGJSON is meant to be read by programs; the others are the sites' own (und
 JSON endpoints, so every answer is cached, requests are spaced out, and a site that fails or
 changes raises Unavailable - the page then says so for that panel and everything else works.
 Nothing here runs while scanning.
+
+The cache is its own file, data/web_cache.db: it can be deleted at any time (everything in it
+is fetched again when asked for), it is not part of any backup, and writing to it never waits
+on - or holds up - the collection. Bodies are compressed, entries older than MAX_AGE go, and
+the oldest make room when it grows past MAX_BYTES.
 """
+import contextlib
 import json
 import logging
 import re
@@ -18,6 +24,7 @@ import sqlite3
 import threading
 import time
 import unicodedata
+import zlib
 from urllib.parse import quote, urlparse
 
 import requests
@@ -31,6 +38,13 @@ TIMEOUT = 10         # seconds per request
 MIN_INTERVAL = 1.0   # seconds between two requests to the same site
 SITE_INTERVALS = {'mtgjson.com': 0.25}  # a file server meant for downloads
 DAY = 86400
+CACHE_FILE = Config.DATA_DIR / 'web_cache.db'
+MAX_AGE = 90 * DAY            # nothing is asked for with a longer max_age (precon lists: 90 days)
+# Measured 2026-10-09 on the collection in use: 419 answers, 138 MB of JSON, the largest
+# 0.98 MB (a precon list); compressed, 37 MB together. Ranking every precon reads ~230 lists
+MAX_BYTES = 200 * 1024 ** 2   # of compressed bodies
+MAX_ENTRY_BYTES = 8 * 1024 ** 2   # one answer, compressed (the largest seen: 0.98 MB before compression)
+PRUNE_EVERY = 25              # writes between two clean-ups
 
 EDHREC = 'https://json.edhrec.com/pages'
 MTGJSON = 'https://mtgjson.com/api/v5'
@@ -60,17 +74,70 @@ def edhrec_slug(name):
 
 
 class Recommendations:
-    def __init__(self, db_file=None):
-        self.db_file = str(db_file or Config.DATABASE_FILE)
+    def __init__(self, db_file=None, old_file=None):
+        """old_file: the card database, where the cache was a table before it had its own file"""
+        self.db_file = str(db_file or CACHE_FILE)
         self._lock = threading.RLock()
         self._site_locks = {}
         self._last_request = {}
-        with self._connect() as conn:
+        self._writes = 0
+        with self._lock, self._connect() as conn:
+            conn.execute('PRAGMA journal_mode=WAL')
             conn.execute('''CREATE TABLE IF NOT EXISTS web_cache (
-                url TEXT PRIMARY KEY, fetched_at REAL NOT NULL, body TEXT NOT NULL)''')
+                url TEXT PRIMARY KEY, fetched_at REAL NOT NULL, size INTEGER NOT NULL, body BLOB NOT NULL)''')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_web_cache_age ON web_cache(fetched_at)')
+        try:
+            self._move_old_cache(str(old_file or Config.DATABASE_FILE))
+        except sqlite3.Error as e:  # only a cache: what could not be moved is fetched again
+            logger.warning(f"The web cache in the card database could not be moved: {e}")
+        self.prune()
 
+    @contextlib.contextmanager
     def _connect(self):
-        return sqlite3.connect(self.db_file, timeout=10.0)
+        """A connection for one piece of work: committed (rolled back on an error) and closed"""
+        conn = sqlite3.connect(self.db_file, timeout=10.0)
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
+    def _move_old_cache(self, old_file):
+        """Once: the answers cached in the card database come over (compressed), and the table
+        there goes - its pages are used again by that file; the file itself does not shrink"""
+        if old_file == self.db_file:
+            return
+        old = sqlite3.connect(old_file, timeout=10.0)
+        try:
+            columns = [row[1] for row in old.execute('PRAGMA table_info(web_cache)')]
+            if columns != ['url', 'fetched_at', 'body']:
+                return
+            moved = 0
+            with self._lock, self._connect() as conn:
+                for url, fetched_at, body in old.execute('SELECT url, fetched_at, body FROM web_cache'):
+                    packed = zlib.compress(body.encode())
+                    conn.execute('INSERT OR IGNORE INTO web_cache VALUES (?, ?, ?, ?)', (url, fetched_at, len(packed), packed))
+                    moved += 1
+            with self._connect() as conn:  # the copy is committed and can be read: only then the table goes
+                if conn.execute('SELECT COUNT(*) FROM web_cache').fetchone()[0] < moved:
+                    raise sqlite3.Error('the copied answers cannot all be read back')
+            old.execute('DROP TABLE web_cache')
+            old.commit()
+            logger.info(f"Web cache moved to {self.db_file}: {moved} answers")
+        finally:
+            old.close()
+
+    def prune(self):
+        """Drop what is too old to be used again, then the oldest answers until the rest fits MAX_BYTES"""
+        with self._lock, self._connect() as conn:
+            conn.execute('DELETE FROM web_cache WHERE fetched_at < ?', (time.time() - MAX_AGE,))
+            total = conn.execute('SELECT COALESCE(SUM(size), 0) FROM web_cache').fetchone()[0]
+            if total > MAX_BYTES:
+                for url, size in conn.execute('SELECT url, size FROM web_cache ORDER BY fetched_at').fetchall():
+                    conn.execute('DELETE FROM web_cache WHERE url = ?', (url,))
+                    total -= size
+                    if total <= MAX_BYTES:
+                        break
 
     # -- Fetching --------------------------------------------------------------
 
@@ -79,8 +146,27 @@ class Recommendations:
         with self._lock, self._connect() as conn:
             row = conn.execute('SELECT fetched_at, body FROM web_cache WHERE url = ?', (url,)).fetchone()
         if row and time.time() - row[0] < max_age:
-            return json.loads(row[1])
+            try:
+                return json.loads(zlib.decompress(row[1]))
+            except (zlib.error, ValueError, TypeError):
+                return None  # unreadable: fetched again
         return None
+
+    def _store(self, url, data):
+        # Only a cache: an answer that cannot be kept (too large, the file not writable) is
+        # still the answer - it is asked for again next time
+        try:
+            packed = zlib.compress(json.dumps(data, separators=(',', ':')).encode())
+            if len(packed) > MAX_ENTRY_BYTES:
+                return
+            with self._lock:
+                with self._connect() as conn:
+                    conn.execute('INSERT OR REPLACE INTO web_cache VALUES (?, ?, ?, ?)', (url, time.time(), len(packed), packed))
+                self._writes += 1
+                if self._writes % PRUNE_EVERY == 0:
+                    self.prune()
+        except (sqlite3.Error, OSError) as e:
+            logger.warning(f"The answer of {url} could not be cached: {e}")
 
     def _get(self, url, max_age, timeout=TIMEOUT):
         """JSON at a URL: from the cache, or requested (one request at a time per site, spaced out)"""
@@ -109,9 +195,7 @@ class Recommendations:
                 self._last_request[site] = time.time()
                 logger.warning(f"{site} not available: {e}")
                 raise Unavailable(f"{site} is not available right now") from e
-        with self._lock, self._connect() as conn:
-            conn.execute('INSERT OR REPLACE INTO web_cache VALUES (?, ?, ?)',
-                         (url, time.time(), json.dumps(data, separators=(',', ':'))))
+        self._store(url, data)
         return data
 
     # -- EDHREC ----------------------------------------------------------------

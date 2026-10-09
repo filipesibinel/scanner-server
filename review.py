@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime
 
 from config import Config
+from pending import APPLIED_CAPTURES_TABLE, prune_applied
 
 logger = logging.getLogger('database')
 
@@ -45,10 +46,20 @@ class ReviewQueue:
                 )''')
             if 'station' not in {row['name'] for row in self.conn.execute('PRAGMA table_info(review_queue)')}:
                 self.conn.execute('ALTER TABLE review_queue ADD COLUMN station TEXT')
+            # Captures that were queued here already (add's capture_key; pending.py)
+            self.conn.execute(APPLIED_CAPTURES_TABLE)
+            prune_applied(self.conn)
             self.conn.commit()
 
-    def add(self, game, image_path, name='', number='', set_code='', foil='unknown', card=None, station=None):
-        """Queue a capture; returns the item id"""
+    def add(self, game, image_path, name='', number='', set_code='', foil='unknown', card=None, station=None,
+            capture_key=None):
+        """Queue a capture; returns the item id. capture_key: the capture's uid (pending.py) -
+        noted in the same commit; a capture queued here before is not queued again (None)."""
+        if capture_key:
+            with self._lock:
+                if self.conn.execute('SELECT 1 FROM applied_captures WHERE key = ?', (capture_key,)).fetchone():
+                    logger.warning(f"Capture {capture_key} was queued for review before (a restart read it again): not queued twice")
+                    return None
         file = None
         if image_path:
             try:
@@ -65,6 +76,9 @@ class ReviewQueue:
                 (game, file, name or '', number or '', set_code or '', foil or 'unknown',
                  card['id'] if card else None, card.get('match') if card else None,
                  datetime.now().strftime('%Y-%m-%d %H:%M:%S'), station)).lastrowid
+            if capture_key:
+                self.conn.execute('INSERT INTO applied_captures (key, target, applied_at) VALUES (?, ?, ?)',
+                                  (capture_key, f'review:{item_id}', datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
             self.conn.commit()
         return item_id
 
