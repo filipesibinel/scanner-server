@@ -908,6 +908,10 @@ afterwards). Errors: `400` (bad id, no readable picture), `401` (token), `413` (
   (`InventoryManager.last_added` is kept per source; the scanner page's own Undo is source
   `None`). Answered to the pages as `inventory_updated` with `station` and `undone`.
 - `GET /api/stations` lists them; `DELETE /api/stations/<id>` forgets one (its cards stay).
+- **The Android app** is such a station in its client mode (`../mtg-scanner-android`,
+  `server/ScannerServer.kt`): it uploads each capture with a `capture_id`, shows the answer,
+  asks again while it is pending and uses the undo endpoint. Change the answer's fields and
+  its `ServerOutcome.parse` (and `ServerOutcomeTest`) must follow.
 - **Settings → Stations** on the scanner page: rename a station, set its location, undo its
   last card (Socket.IO `undo_last_add` with `station`), forget it. A station's adds don't touch
   the page's card panel - they show in the activity log (`inventory_updated` carries
