@@ -135,7 +135,14 @@ docker compose -f docker-compose.client.yml logs -f
 
 Measured 2026-10-08 on a laptop (Ryzen 5 7235HS, Anker C200): image 510 MB, ~28% of one core,
 66 MB; live view 12 fps; a manual capture and a focus sweep asked from the server's page worked.
-Not tested: unplugging the camera while it runs, and the ARM64 build.
+
+Measured 2026-10-09 on a Raspberry Pi 5 (8 GB, Raspberry Pi OS / Debian 13, 64-bit, the same
+Anker C200, Wi-Fi): the ARM64 image builds there in 37 s; ~50% of one core - about half of what
+the capture loop may use, so it keeps the 20 frames a second - 68 °C without throttling; live
+view 11.6 fps; a manual capture read by the server's OCR, and a focus sweep asked from the
+server's page (locked at 424, saved on the server).
+
+Not tested: unplugging the camera while it runs; dropping cards one after another on the Pi.
 
 ## What the script does
 
