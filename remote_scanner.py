@@ -122,9 +122,10 @@ class RemoteScanner:
     # ------------------------------------------------------------------------
 
     def log(self, message, level="info"):
-        getattr(logger, 'info' if level == 'success' else level, logger.info)(message)
         if self.log_callback:
-            self.log_callback(message, level)
+            self.log_callback(message, level)  # app.py's log_to_client: the log file and the station's pages
+        else:
+            getattr(logger, 'info' if level == 'success' else level, logger.info)(message)
 
     def _emit(self, event, data):
         sid = self.sid
