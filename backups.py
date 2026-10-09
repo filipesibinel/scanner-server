@@ -3,6 +3,7 @@
 # Backups of what the user made - the collection, the scanned cards and the
 # decks - taken from the collection page (before a big load) and restored there
 # ============================================================================
+import hashlib
 import json
 import logging
 import os
@@ -16,7 +17,7 @@ from inventory import CAPTURES_DIR
 
 logger = logging.getLogger(__name__)
 
-# Made by the user (kept until deleted), when the app starts (create_daily) and before a restore.
+# Made by the user (kept until deleted), on a schedule (create_scheduled) and before a restore.
 # One folder per backup, named by its time: backup.db (the tables below as plain copies, and
 # `info`) and captures/ - the capture thumbnails the entries point at, as hard links (no extra
 # space; they stay when the app deletes its own). Card data and settings are not part of it:
@@ -29,7 +30,13 @@ BACKUP_ID = re.compile(r'^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(-\d+)?$')
 INVENTORY_TABLES = ('inventory', 'inventory_captures', 'inventory_sources')
 DECK_TABLES = ('decks', 'deck_cards')
 KEEP_AUTOMATIC = 5  # backups made before a restore; the ones the user makes are kept until deleted
-KEEP_DAILY = 7      # backups made when the app starts (one per day, see create_daily)
+# The scheduled ones (create_scheduled; marked 'daily' in their info, whatever the interval):
+# how often, and how many are kept, are settings (backup_every_hours, backup_keep) - these are
+# the choices and the defaults
+SCHEDULE_HOURS = (0, 1, 6, 12, 24, 168)  # 0: off
+EVERY_HOURS = 24
+KEEP_DAILY = 7
+KEEP_MAX = 60
 
 
 class BackupError(Exception):
@@ -66,11 +73,25 @@ def _link(source, target):
         shutil.copyfile(source, target)
 
 
-def create(inventory, scan_inventory, deck_store, note='', automatic=False, daily=False, keep=None):
+def _fingerprint(inventory, scan_inventory, deck_store):
+    """A hash of every row a backup would hold (call it under the three locks)"""
+    digest = hashlib.sha1()
+    for prefix, manager, tables in _parts(inventory, scan_inventory, deck_store):
+        for table in tables:
+            columns = _columns(manager.conn, table)
+            digest.update(repr((prefix + table, columns)).encode())
+            for row in manager.conn.execute(f"SELECT {', '.join(columns)} FROM {table}"):
+                digest.update(repr(tuple(row)).encode())
+    return digest.hexdigest()
+
+
+def create(inventory, scan_inventory, deck_store, note='', automatic=False, daily=False, keep=None,
+           keep_daily=KEEP_DAILY):
     """
     Back up the collection, the scanned cards and the decks as they are now; returns its info.
     keep: the id of a backup that must not be cleared away to make room for this one (the one
-    about to be restored - it may be the oldest automatic backup itself).
+    about to be restored - it may be the oldest automatic backup itself). keep_daily: how many
+    of the scheduled backups stay, when this is one (daily).
     """
     created = datetime.now()
     backup_id = created.strftime('%Y-%m-%d_%H-%M-%S')
@@ -85,6 +106,7 @@ def create(inventory, scan_inventory, deck_store, note='', automatic=False, dail
         target = sqlite3.connect(str(work / 'backup.db'))
         parts = _parts(inventory, scan_inventory, deck_store)
         with inventory._lock, scan_inventory._lock, deck_store._lock:
+            fingerprint = _fingerprint(inventory, scan_inventory, deck_store)
             for prefix, manager, tables in parts:
                 for table in tables:
                     columns = _columns(manager.conn, table)
@@ -103,6 +125,7 @@ def create(inventory, scan_inventory, deck_store, note='', automatic=False, dail
             'entries': count('SELECT COUNT(*) FROM collection_inventory'),
             'scanned': count('SELECT COALESCE(SUM(quantity), 0) FROM scanned_inventory'),
             'decks': count('SELECT COUNT(*) FROM decks'),
+            'fingerprint': fingerprint,  # create_scheduled: nothing changed since, no new backup
         }
         target.execute('CREATE TABLE info (value TEXT)')
         target.execute('INSERT INTO info VALUES (?)', (json.dumps(info),))
@@ -114,7 +137,7 @@ def create(inventory, scan_inventory, deck_store, note='', automatic=False, dail
         raise
     logger.info(f"Backup {backup_id}: {info['cards']} cards, {info['scanned']} scanned, {info['decks']} decks")
     # Only its own kind makes room: the daily ones don't push out the ones before a restore
-    for kind, limit in (('daily', KEEP_DAILY if daily else None), ('automatic', KEEP_AUTOMATIC if automatic else None)):
+    for kind, limit in (('daily', keep_daily if daily else None), ('automatic', KEEP_AUTOMATIC if automatic else None)):
         if limit:
             for old in [item for item in list_backups() if item.get(kind)][limit:]:
                 if old['id'] != keep:
@@ -122,19 +145,54 @@ def create(inventory, scan_inventory, deck_store, note='', automatic=False, dail
     return info
 
 
-def create_daily(inventory, scan_inventory, deck_store):
+def create_scheduled(inventory, scan_inventory, deck_store, every_hours=EVERY_HOURS, keep_count=KEEP_DAILY,
+                     note='Automatic'):
     """
-    The backup made when the app starts: one per day - a later start the same day finds it and
-    makes none, as does a start with nothing to keep. Returns its info, or None.
+    The backup made on a schedule (asked for when the app starts and every few minutes after):
+    one when the last scheduled backup is every_hours old or older - and none while every_hours
+    is 0 (off), nothing has changed since the newest backup of any kind, or there is nothing
+    to keep. The newest keep_count scheduled backups stay. Returns its info, or None.
     """
-    today = datetime.now().strftime('%Y-%m-%d')
-    if any(item.get('daily') and item['created'].startswith(today) for item in list_backups()):
+    if not every_hours:
         return None
-    made = create(inventory, scan_inventory, deck_store, note='Application start', daily=True)
-    if not (made['entries'] or made['scanned'] or made['decks']):
-        delete(made['id'])
-        return None
-    return made
+    existing = list_backups()
+    last = next((item for item in existing if item.get('daily')), None)
+    if last:
+        age = datetime.now() - datetime.strptime(last['created'], '%Y-%m-%d %H:%M:%S')
+        if age.total_seconds() < every_hours * 3600:
+            return None
+    # Decided and made under the locks, so what is judged is what is saved. Nothing to keep is
+    # decided before create: an empty backup once pushed out the last one with cards in it
+    # (create clears older ones away) and was then deleted itself
+    with inventory._lock, scan_inventory._lock, deck_store._lock:
+        if not any(manager.conn.execute(f'SELECT 1 FROM {table} LIMIT 1').fetchone()
+                   for manager, table in ((inventory, 'inventory'), (scan_inventory, 'inventory'), (deck_store, 'decks'))):
+            return None
+        if existing and existing[0].get('fingerprint') == _fingerprint(inventory, scan_inventory, deck_store):
+            return None
+        return create(inventory, scan_inventory, deck_store, note=note, daily=True,
+                      keep_daily=max(1, min(KEEP_MAX, int(keep_count))))
+
+
+def parse_schedule(data):
+    """
+    The settings in a request to change the schedule ({'every_hours', 'keep'}, each optional), as
+    {setting key: value} - or ValueError, before anything is saved: a request refused for one
+    value must not have changed the other.
+    """
+    changes = {}
+    try:
+        if 'every_hours' in data:
+            changes['backup_every_hours'] = int(data['every_hours'])
+            if changes['backup_every_hours'] not in SCHEDULE_HOURS or isinstance(data['every_hours'], bool):
+                raise ValueError
+        if 'keep' in data:
+            if isinstance(data['keep'], bool):
+                raise ValueError
+            changes['backup_keep'] = max(1, min(KEEP_MAX, int(data['keep'])))
+    except TypeError:
+        raise ValueError
+    return changes
 
 
 def list_backups():

@@ -7,7 +7,7 @@
     <title>Collection - Card Scanner</title>
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=43">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/collection.css') }}?v=12">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/collection.css') }}?v=13">
 </head>
 <body>
     {% include '_icons.html' %}
@@ -348,7 +348,21 @@
             <div class="modal-body">
                 <div class="settings-section">
                     <h3>Backups</h3>
-                    <div class="hint">Your collection, the scanned cards and your decks as they are now. One is made every day the app is started (the last 7 are kept); make one yourself before a big load (adding scanned cards, importing a file) - restoring it puts all three back.</div>
+                    <div class="hint">Your collection, the scanned cards and your decks as they are now. Make one yourself before a big load (adding scanned cards, importing a file) - restoring it puts all three back.</div>
+                    <div class="backup-schedule">
+                        <label for="backup-every">Automatic backup</label>
+                        <select id="backup-every" class="text-input">
+                            <option value="0">Off</option>
+                            <option value="1">Every hour</option>
+                            <option value="6">Every 6 hours</option>
+                            <option value="12">Every 12 hours</option>
+                            <option value="24">Every day</option>
+                            <option value="168">Every week</option>
+                        </select>
+                        <label for="backup-keep">keep the last</label>
+                        <input type="number" id="backup-keep" class="text-input" min="1" max="60" value="7">
+                    </div>
+                    <div class="hint">Made while the app runs, and only when something changed since the last backup. Older automatic ones are cleared away when a new one is made; the ones you make stay until you delete them.</div>
                     <div class="model-row backup-new">
                         <input type="text" id="backup-note" class="text-input" maxlength="80" placeholder="Note (optional)" autocomplete="off">
                         <button class="btn btn-primary" id="backup-create">Back up now</button>
@@ -370,6 +384,6 @@
     {% include '_dialogs.html' %}
 
     <script src="{{ url_for('static', filename='js/common.js') }}?v=16"></script>
-    <script src="{{ url_for('static', filename='js/collection.js') }}?v=26"></script>
+    <script src="{{ url_for('static', filename='js/collection.js') }}?v=27"></script>
 </body>
 </html>

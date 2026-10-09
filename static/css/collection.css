@@ -966,6 +966,23 @@ a.btn {
     margin: 12px 0;
 }
 
+.backup-schedule {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 12px 0 6px;
+    font-size: 13px;
+}
+
+.backup-schedule select {
+    width: auto;
+}
+
+.backup-schedule input {
+    width: 70px;
+}
+
 .backup-new .text-input {
     flex: 1;
     min-width: 0;

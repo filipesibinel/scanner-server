@@ -1035,10 +1035,21 @@ row (time, note, counts) - every game - and `captures/`, hard links to the thumb
 entries point at (no extra space; they survive the app deleting its own). It is written to a
 `.tmp` folder and moved into place, under the three managers' locks.
 
-**At startup** `backups.create_daily` (from `initialize_components`) makes the day's backup,
-marked `daily` (note "Application start"): a later start the same day finds it and makes
-none, an empty collection makes none, and the last `KEEP_DAILY` (7) are kept. A failure is
-logged and does not stop the app. Backups made by hand are never deleted automatically.
+**Automatic backups** (`backups.create_scheduled`, marked `daily` in their info whatever the
+interval) are asked for at startup (`initialize_components`, note "Application start") and
+every ten minutes while the app runs (`run_backup_schedule`, note "Automatic") - a server stays
+up for weeks, and a backup made only at startup would never come. One is made when the last
+automatic backup is as old as the interval; none while nothing has changed since the newest
+backup of any kind (`fingerprint` in a backup's info: a hash of every row it holds), and none
+of an empty collection - both decided before anything is written or cleared away, under the
+managers' locks. The interval and how many are kept are set in the drawer
+(`POST /api/backups/schedule`; `backup_every_hours` - 0 off, 1, 6, 12, 24, 168 - and
+`backup_keep`, 1-60, in `data/settings.json`; default every day, the last 7); older ones are
+deleted when a new one is made, not when the number is lowered. A failure is logged and does
+not stop the app. Backups made by hand are never deleted automatically. They are in
+`data/backups/`, on the same disk as the data: against a lost disk, copy that folder elsewhere
+(`scripts/backup.sh` archives everything). Covered by `tests/test_ownership.py`
+(`ScheduledBackups`); the ten-minute timer itself and the drawer's controls were not tested.
 
 **Restore** (`POST /api/backups/<id>/restore`, `backups.restore`) first makes an automatic
 backup of the current state ("Before restoring ...", the last 5 are kept - never clearing away
@@ -1204,7 +1215,7 @@ one game exists. Card payloads may carry `finish_options` (only those finishes a
 | `config.yaml` | Vision AI defaults, web server, station token, cleanup, card data update interval; `camera.type: remote` (or `SCANNER_CAMERA=remote`, the Docker image's default) for a server without a camera |
 | `.env` (beside `docker-compose.yml`) | API keys (`GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`); `VISION_AI_PROVIDER`, `LOCAL_AI_ENDPOINT`, `SCANNER_STATION_TOKEN`; for Docker also `SCANNER_PORT`, `SCANNER_UID`, `SCANNER_GID` |
 | `data/api_keys.env` | Keys and local endpoint entered in Settings (`api_keys.py`, mode 600); overrides `.env`. The page only ever receives masked keys (`/api/ai_credentials`) - the web interface has no login |
-| `data/settings.json` | Choices made in the web interface that are everyone's: AI provider / model, OCR first, the game, sound on / off, the capture beep and the card-added ding each on / off (`sound_capture`, `sound_added`) and volume (`POST /api/sound`), debug mode (`debug_mode`: Flask's debugger, and every request in `data/logs/requests.log`; taken when the server starts, always without the reloader). Also the camera settings of a camera on the server itself - which a new station inherits until it has its own |
+| `data/settings.json` | Choices made in the web interface that are everyone's: AI provider / model, OCR first, the game, automatic backups (`backup_every_hours`, `backup_keep`), sound on / off, the capture beep and the card-added ding each on / off (`sound_capture`, `sound_added`) and volume (`POST /api/sound`), debug mode (`debug_mode`: Flask's debugger, and every request in `data/logs/requests.log`; taken when the server starts, always without the reloader). Also the camera settings of a camera on the server itself - which a new station inherits until it has its own |
 | `data/stations.json` | The stations: name, location, capture count, last seen, `camera` (it connects as a camera station), and `settings` - each station's `focus_value`, `camera_rotation`, `refocus_every`, `fixed_area`, `fixed_area_enabled`, `debug_trace`, `auto_add` |
 | `data/prompts.json` | Prompt instructions edited in Settings, per game / kind / model (`prompts.py`) |
 | `data/cards_database.db` | Card data (`cards`, `card_data_info`), the collection (`inventory`, `inventory_captures`, `inventory_sources`), decks (`decks`, `deck_cards`), the review queue (`review_queue`) and answers cached from other sites (`web_cache`) |

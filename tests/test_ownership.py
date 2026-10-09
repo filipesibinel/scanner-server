@@ -187,5 +187,76 @@ class Backups(TemporaryData):
         self.assertEqual(len(kept), backups.KEEP_AUTOMATIC)
 
 
+
+class ScheduledBackups(TemporaryData):
+    def scheduled(self, every_hours=24, keep_count=7):
+        return backups.create_scheduled(self.collection, self.scan, self.decks, every_hours, keep_count)
+
+    def age(self, backup_id, hours):
+        """Make a backup look as if it was made that many hours ago"""
+        import json, sqlite3
+        from datetime import datetime, timedelta
+        conn = sqlite3.connect(str(backups.BACKUPS_DIR / backup_id / 'backup.db'))
+        info = json.loads(conn.execute('SELECT value FROM info').fetchone()[0])
+        info['created'] = (datetime.now() - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')
+        conn.execute('UPDATE info SET value = ?', (json.dumps(info),))
+        conn.commit()
+        conn.close()
+
+    def test_made_when_due_and_changed(self):
+        self.assertIsNone(self.scheduled())                       # nothing to keep yet
+        self.assertEqual(backups.list_backups(), [])
+        self.collection.add_card(CARD, GAME, 'regular', quiet=True)
+        first = self.scheduled()
+        self.assertTrue(first['daily'])
+        self.collection.add_card(OTHER, GAME, 'regular', quiet=True)
+        self.assertIsNone(self.scheduled())                       # changed, but not due
+        self.age(first['id'], 25)
+        self.assertEqual(self.scheduled()['cards'], 2)            # due and changed
+        self.assertEqual(len(backups.list_backups()), 2)
+
+    def test_none_while_nothing_changed(self):
+        self.collection.add_card(CARD, GAME, 'regular', quiet=True)
+        first = self.scheduled()
+        self.age(first['id'], 25)
+        self.assertIsNone(self.scheduled())                       # due, but the same as the last one
+        self.add('desk-a')                                        # a scanned card is a change too
+        self.assertIsNotNone(self.scheduled())
+
+    def test_an_empty_collection_leaves_the_last_backup(self):
+        row_id = self.collection.add_card(CARD, GAME, 'regular', quiet=True)
+        first = self.scheduled(keep_count=1)
+        self.age(first['id'], 25)
+        self.collection.delete_card(row_id, quiet=True)
+        self.assertIsNone(self.scheduled(keep_count=1))           # used to clear away `first` for an empty one
+        self.assertEqual([item['id'] for item in backups.list_backups()], [first['id']])
+
+    def test_a_refused_schedule_changes_nothing(self):
+        self.assertEqual(backups.parse_schedule({'every_hours': 0, 'keep': '500'}),
+                         {'backup_every_hours': 0, 'backup_keep': backups.KEEP_MAX})
+        for bad in ({'every_hours': 0, 'keep': 'invalid'}, {'every_hours': 5}, {'every_hours': None},
+                    {'keep': [1]}, {'every_hours': 24, 'keep': None}):
+            with self.assertRaises(ValueError):                   # raised before the caller saves anything
+                backups.parse_schedule(bad)
+
+    def test_off(self):
+        self.collection.add_card(CARD, GAME, 'regular', quiet=True)
+        self.assertIsNone(self.scheduled(every_hours=0))
+        self.assertEqual(backups.list_backups(), [])
+
+    def test_keeps_the_newest_only_and_the_manual_ones(self):
+        self.collection.add_card(CARD, GAME, 'regular', quiet=True)
+        manual = self.backup(note='mine')
+        for n in range(4):
+            for item in backups.list_backups():
+                if item.get('daily'):
+                    self.age(item['id'], 2)
+            self.collection.add_card(dict(CARD, number=str(10 + n)), GAME, 'regular', quiet=True)
+            self.assertIsNotNone(self.scheduled(every_hours=1, keep_count=2))
+        listed = backups.list_backups()
+        self.assertEqual(len([item for item in listed if item.get('daily')]), 2)
+        self.assertIn(manual, [item['id'] for item in listed])
+
+
 if __name__ == '__main__':
     unittest.main()

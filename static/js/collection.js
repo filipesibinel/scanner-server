@@ -1286,7 +1286,21 @@ function closeSettings() {
 
 async function loadBackups() {
     const data = await api('/api/backups');
-    if (data) renderBackups(data.backups);
+    if (!data) return;
+    renderBackups(data.backups);
+    $('backup-every').value = String(data.schedule.every_hours);
+    $('backup-keep').value = data.schedule.keep;
+    $('backup-keep').disabled = !data.schedule.every_hours;
+}
+
+async function saveBackupSchedule(change) {
+    // How often automatic backups are made, how many are kept (the server answers with what it took)
+    const data = await api('/api/backups/schedule', {method: 'POST', body: change});
+    if (!data) return loadBackups();
+    $('backup-every').value = String(data.schedule.every_hours);
+    $('backup-keep').value = data.schedule.keep;
+    $('backup-keep').disabled = !data.schedule.every_hours;
+    notify(data.schedule.every_hours ? 'Automatic backups saved' : 'Automatic backups switched off', 'success');
 }
 
 function renderBackups(backups) {
@@ -1606,6 +1620,8 @@ function bindEvents() {
     // Settings drawer (backups); /collection#settings opens it (the scanner's settings link here)
     $('settings-close').addEventListener('click', closeSettings);
     $('backup-create').addEventListener('click', createBackup);
+    $('backup-every').addEventListener('change', event => saveBackupSchedule({every_hours: parseInt(event.target.value)}));
+    $('backup-keep').addEventListener('change', event => saveBackupSchedule({keep: parseInt(event.target.value) || 1}));
     $('backup-note').addEventListener('keydown', event => { if (event.key === 'Enter') createBackup(); });
     $('backup-list').addEventListener('click', event => {
         const button = event.target.closest('[data-backup-action]');

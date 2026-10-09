@@ -779,17 +779,18 @@ def initialize_components():
     deck_store = DeckManager()
     recommend = Recommendations()
 
-    # The day's backup of the collection, scanned cards and decks (a restart finds it and makes none)
+    # The automatic backup of the collection, scanned cards and decks, if one is due
+    # (run_backup_schedule asks again while the app runs)
     global daily_backup_status
     try:
-        made = backups.create_daily(inventory, scan_inventory, deck_store)
+        made = scheduled_backup('Application start')
         daily_backup_status = (
-            f"✓ Daily backup made: {made['cards']} cards, {made['scanned']} scanned, {made['decks']} decks" if made
-            else "- Daily backup: today's is there already (or there is nothing to back up)")
+            f"✓ Automatic backup made: {made['cards']} cards, {made['scanned']} scanned, {made['decks']} decks" if made
+            else "- Automatic backup: none due (switched off, made recently, or nothing changed)")
         logger.info(daily_backup_status[2:])
     except Exception as e:
-        daily_backup_status = f"⚠ The daily backup failed: {e}"
-        logger.error(f"The daily backup failed: {e}", exc_info=True)
+        daily_backup_status = f"⚠ The automatic backup failed: {e}"
+        logger.error(f"The automatic backup failed: {e}", exc_info=True)
 
     # Set up auto-capture callback
     def handle_auto_capture():
@@ -1152,6 +1153,49 @@ def remove_inventory_batch():
     return jsonify({'success': True, **inventory_area().remove_batch(games.active().id, added_at)})
 
 
+def backup_schedule():
+    """The automatic backups' settings: {'every_hours' (0: off), 'keep'}"""
+    try:
+        every, keep = int(app_settings.get('backup_every_hours', backups.EVERY_HOURS)), int(app_settings.get('backup_keep', backups.KEEP_DAILY))
+    except (TypeError, ValueError):  # data/settings.json edited by hand
+        every, keep = backups.EVERY_HOURS, backups.KEEP_DAILY
+    return {'every_hours': every if every in backups.SCHEDULE_HOURS else backups.EVERY_HOURS,
+            'keep': max(1, min(backups.KEEP_MAX, keep))}
+
+
+def scheduled_backup(note='Automatic'):
+    """Make the automatic backup if one is due (backups.create_scheduled); its info, or None"""
+    schedule = backup_schedule()
+    return backups.create_scheduled(inventory, scan_inventory, deck_store, schedule['every_hours'],
+                                    schedule['keep'], note=note)
+
+
+def run_backup_schedule():
+    """Ask every ten minutes whether an automatic backup is due - the app runs for weeks on a server"""
+    def loop():
+        while True:
+            time.sleep(600)
+            try:
+                scheduled_backup()
+            except Exception as e:
+                logger.error(f"The automatic backup failed: {e}", exc_info=True)
+    threading.Thread(target=loop, daemon=True, name='backup-schedule').start()
+
+
+@app.route('/api/backups/schedule', methods=['POST'])
+def set_backup_schedule():
+    """How often automatic backups are made and how many are kept (JSON: 'every_hours', 'keep')"""
+    data = request.get_json(silent=True) or {}
+    try:
+        changes = backups.parse_schedule(data)  # all of it checked before any of it is saved
+    except ValueError:
+        return jsonify({'success': False, 'error': 'Unknown backup interval or number to keep'}), 400
+    for key, value in changes.items():
+        app_settings.set(key, value)
+    logger.info(f"Automatic backups: {backup_schedule()}")
+    return jsonify({'success': True, 'schedule': backup_schedule()})
+
+
 @app.route('/api/backups', methods=['GET', 'POST'])
 def collection_backups():
     """The backups of the collection, scanned cards and decks; POST makes one (JSON: note)"""
@@ -1163,7 +1207,7 @@ def collection_backups():
             logger.error(f"Backup failed: {e}", exc_info=True)
             return jsonify({'success': False, 'error': f'The backup failed: {e}'}), 500
         return jsonify({'success': True, 'backup': made, 'backups': backups.list_backups()})
-    return jsonify({'success': True, 'backups': backups.list_backups()})
+    return jsonify({'success': True, 'backups': backups.list_backups(), 'schedule': backup_schedule()})
 
 
 @app.route('/api/backups/<backup_id>/restore', methods=['POST'])
@@ -3274,6 +3318,7 @@ def main():
     # Start background cleanup
     run_cleanup_background()
     run_update_checks()
+    run_backup_schedule()
 
     game = games.active()
     logger.info(f"Scanning {game.label}: {game.card_count():,} cards in the database")

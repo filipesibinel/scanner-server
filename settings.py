@@ -25,6 +25,8 @@ class Settings:
         'debug_trace': False,  # Log filtered detections, save frames of slow or doubtful captures
         'sound_enabled': True,  # Sound effects on the scanner page
         'sound_volume': 30,  # 0-100
+        'backup_every_hours': 24,  # Automatic backups: how often (0 = off; backups.SCHEDULE_HOURS)
+        'backup_keep': 7,  # ... and how many of them are kept
         'sound_capture': True,  # The capture beep (the signal to drop the next card)
         'sound_added': True,  # The ding when a card is added to the scanned cards
         'focus_value': None,  # Locked manual focus position (None = continuous autofocus)
