@@ -42,6 +42,42 @@ venv/bin/python app.py             # if you didn't install the service
 The script supports apt (Debian, Ubuntu, Raspberry Pi OS), pacman (Arch), dnf (Fedora) and
 zypper (openSUSE) for the few system packages it needs.
 
+## Server in Docker
+
+The server (web app, card data, OCR reader, AI requests) runs as a container on any x86-64
+Linux machine with Docker - no camera needed there. Files: `Dockerfile` (target `server`),
+`docker-compose.yml`, `docker-compose.gpu.yml`, `scripts/docker-entrypoint.sh`.
+
+```bash
+git clone <this repository> scanner-server && cd scanner-server
+mkdir -p data scanned_cards        # before the first start, so they belong to you, not root
+docker compose up -d --build
+docker compose logs -f             # the first start downloads the card database (a few minutes)
+```
+
+Then open `http://<server>:5000`. Stop with `docker compose stop` (the app closes its databases,
+like Ctrl+C).
+
+- **Your data** is in `data/` (collection, scanned cards, settings, API keys entered in
+  Settings, backups, logs) and `scanned_cards/` (captured images), next to the compose file.
+  To move an existing installation, stop both, copy its `data/` here and start the container.
+- **Another user id**: the container runs as 1000:1000, the owner the two folders must have.
+  Set `SCANNER_UID` / `SCANNER_GID` in `.env` if yours differ; `SCANNER_PORT` changes the port.
+- **API keys**: in Settings, or in `.env` beside the compose file (see `.env.example`).
+- **Ollama on the same machine**: the container reaches it as `host.docker.internal:11434`
+  (the default `LOCAL_AI_ENDPOINT`). Ollama must listen on more than 127.0.0.1
+  (`OLLAMA_HOST=0.0.0.0`) and a firewall must let the Docker network reach port 11434. For
+  Ollama elsewhere, set `LOCAL_AI_ENDPOINT=http://<host>:11434/v1/chat/completions` in `.env`.
+- **OCR on an NVIDIA GPU** (needs the NVIDIA Container Toolkit):
+
+  ```bash
+  docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+  ```
+
+  `data/logs/ai.log` then says `light-ocr ready (webgpu)` instead of `(cpu)`. Measured on an
+  RTX 4070 Ti SUPER: 0.10 s per card, against 0.67 s on 4 cores of a Ryzen 7 7800X3D.
+- **Updating**: `git pull`, then the same `up -d --build` command.
+
 ## What the script does
 
 Each step is skipped when it's already done, so it's safe to run again at any time:

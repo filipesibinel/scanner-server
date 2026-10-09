@@ -1,0 +1,15 @@
+# Runtime data and secrets stay out of the image (data/ and scanned_cards/ are volumes)
+data/
+scanned_cards/
+.env
+.env.*
+!.env.example
+
+# Built inside the image
+venv/
+ocr/node_modules/
+__pycache__/
+*.pyc
+
+.git/
+.claude/

@@ -1,0 +1,14 @@
+# Adds an NVIDIA GPU to the server, for the OCR reader (needs the NVIDIA Container Toolkit):
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+# Settings -> the log then says "light-ocr ready (webgpu)" instead of "(cpu)".
+services:
+  server:
+    environment:
+      NVIDIA_DRIVER_CAPABILITIES: all  # "graphics" brings the Vulkan driver, not only CUDA
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

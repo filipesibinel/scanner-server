@@ -1,0 +1,30 @@
+# Card scanner server: the web app, card data, OCR reader and AI requests.
+#   mkdir -p data scanned_cards      # before the first start, so they belong to you, not root
+#   docker compose up -d --build
+# With an NVIDIA GPU for the OCR reader:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+services:
+  server:
+    build:
+      context: .
+      target: server
+    image: mtg-scanner-server
+    container_name: mtg-scanner-server
+    init: true
+    stop_signal: SIGINT  # like Ctrl+C: the app closes its databases
+    restart: unless-stopped
+    user: "${SCANNER_UID:-1000}:${SCANNER_GID:-1000}"  # the owner of data/ and scanned_cards/
+    ports:
+      - "${SCANNER_PORT:-5000}:5000"
+    volumes:
+      - ./data:/app/data                    # collection, scanned cards, settings, keys, backups, logs
+      - ./scanned_cards:/app/scanned_cards  # captured card images
+      - /etc/localtime:/etc/localtime:ro    # log times and the daily backup follow the host's clock
+    environment:
+      # Ollama on the machine running Docker (must listen on more than 127.0.0.1)
+      LOCAL_AI_ENDPOINT: ${LOCAL_AI_ENDPOINT:-http://host.docker.internal:11434/v1/chat/completions}
+    env_file:
+      - path: .env  # API keys (see .env.example); keys entered in Settings go to data/api_keys.env
+        required: false
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

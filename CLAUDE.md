@@ -29,6 +29,8 @@ User docs: [README.md](README.md); deployment: [INSTALL.md](INSTALL.md).
 venv/bin/python app.py                    # run (http://localhost:5000)
 venv/bin/python setup_database.py         # (re)download the Scryfall card database
 venv/bin/python cleanup.py --stats        # scanned images; --days N / --dry-run / --all
+docker compose up -d --build              # the server as a container (data/ and scanned_cards/ are volumes)
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build   # ... with OCR on an NVIDIA GPU
 ```
 
 Dependencies: `requirements.txt` (~300 MB, Python 3.10+). The dev venv on this machine is
@@ -128,4 +130,9 @@ with a fake camera (patch `detect_camera_type` / `_initialize_usb_camera`).
   from scanning code paths.
 - **New Socket.IO events** need a handler in `app.py` and in `static/js/scanner.js`, and a line
   in PROGRAM_DOCUMENTATION.md.
+- **Docker image** (`Dockerfile`, target `server`; INSTALL.md "Server in Docker"): light-ocr's
+  native library needs glibc 2.38+ (Debian 13 base images - on Debian 12 OCR silently fails to
+  start), and NVIDIA's Vulkan driver needs the X11 / GLVND libraries plus
+  `NVIDIA_DRIVER_CAPABILITIES=all`, or OCR falls back to the CPU. After changing the image,
+  check `data/logs/ai.log` for `light-ocr ready (webgpu)`.
 - **Logs**: `data/logs/app.log`, `ai.log`, `scanner.log`, `database.log`, `scanned_cards.log`; `requests.log` (web requests) only with Debug mode on.
