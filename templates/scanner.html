@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="dark light">
     <title>Card Scanner</title>
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=41">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=42">
 </head>
 <body>
     {% include '_icons.html' %}
@@ -200,6 +200,12 @@
                 </div>
 
                 <div class="settings-section">
+                    <h3>Stations</h3>
+                    <div id="stations-list"></div>
+                    <div class="hint" id="stations-hint"></div>
+                </div>
+
+                <div class="settings-section">
                     <h3>Sound</h3>
                     <label class="switch-row">
                         <span class="switch-text">
@@ -349,6 +355,6 @@
 
     <script src="{{ url_for('static', filename='js/audio.js') }}?v=29"></script>
     <script src="{{ url_for('static', filename='js/common.js') }}?v=15"></script>
-    <script src="{{ url_for('static', filename='js/scanner.js') }}?v=49"></script>
+    <script src="{{ url_for('static', filename='js/scanner.js') }}?v=50"></script>
 </body>
 </html>

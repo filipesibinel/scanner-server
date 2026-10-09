@@ -284,6 +284,16 @@ socket.on('inventory_updated', function(data) {
     const added = data.added;
     loadStats();
 
+    if (data.station) {
+        // A card from a station (a camera elsewhere): it goes on in the background - the card
+        // on this page stays, and the station makes its own sounds
+        if (added) addLog(timeNow(), 'success', `[${data.station}] Added ${added.quantity}× ${added.name} (${added.finish})`);
+        if (data.undone) addLog(timeNow(), 'warning', `[${data.station}] Removed ${data.undone} from the inventory (undo)`);
+        if (isOpen('inventory-modal')) loadInventory();
+        if ($('settings-drawer').classList.contains('show')) loadStations();
+        return;
+    }
+
     if (reviewItem) {
         // An automatic add while reviewing, or the reviewed card (the next item follows)
         if (added) addLog(timeNow(), 'success', `Added ${added.quantity}× ${added.name} (${added.finish})`);
@@ -583,7 +593,7 @@ function renderReview(item) {
             <div class="review-side">
                 <div class="field-label">AI read</div>
                 <div class="review-read">${escapeHtml(read)}</div>
-                <div class="hint">${escapeHtml(item.captured_at)}</div>
+                <div class="hint">${escapeHtml(item.captured_at)}${item.station ? ' · from ' + escapeHtml(item.station) : ''}</div>
                 <div class="review-search">
                     <input type="text" id="review-name" placeholder="Card name" value="${escapeHtml(ai.name || '')}">
                     <input type="text" id="review-set" placeholder="Set" value="${escapeHtml(ai.set || '')}" maxlength="5">
@@ -1626,6 +1636,74 @@ async function clearInventory() {
 
 function openSettings() {
     $('settings-drawer').classList.add('show');
+    loadStations();
+}
+
+// ============================================================================
+// Stations: cameras elsewhere (a phone, a laptop) that capture cards and send them here
+// ============================================================================
+
+function loadStations() {
+    fetch('/api/stations')
+        .then(response => response.json())
+        .then(data => renderStations(data.stations, data.token_required))
+        .catch(error => console.error('Error loading stations:', error));
+}
+
+function renderStations(stations, tokenRequired) {
+    $('stations-hint').textContent =
+        `A station sends its cards to ${window.location.origin}/api/stations/<its id>/captures`
+        + (tokenRequired ? ' - with the station token set on this server.' : '. It appears here with its first card.');
+    $('stations-list').innerHTML = stations.length ? stations.map(station => {
+        const id = escapeHtml(station.id);
+        return `
+        <div class="station" data-id="${id}">
+            <div class="station-fields">
+                <input type="text" class="text-input" value="${escapeHtml(station.name)}" maxlength="60" title="Name"
+                       aria-label="Station name" onchange="saveStation('${id}', {name: this.value})">
+                <input type="text" class="text-input" value="${escapeHtml(station.location || '')}" maxlength="60"
+                       list="scan-location-options" placeholder="Location: as above" title="Its cards get this inventory location"
+                       aria-label="Station location" autocomplete="off" onchange="saveStation('${id}', {location: this.value})">
+            </div>
+            <div class="station-meta">
+                <span class="hint">${station.captures} card${station.captures === 1 ? '' : 's'} · last ${escapeHtml(station.last_seen || 'never')}</span>
+                <button class="btn btn-small" onclick="undoStationAdd('${id}')" title="Take back the last card this station added">Undo last</button>
+                <button class="btn btn-small btn-danger" onclick="forgetStation('${id}')" title="Remove it from this list - its cards stay">Forget</button>
+            </div>
+        </div>`;
+    }).join('') : '<div class="hint">No station has sent a card yet.</div>';
+}
+
+function saveStation(id, change) {
+    fetch('/api/stations/' + encodeURIComponent(id), {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(change)
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (!data.success) throw new Error(data.message);
+        loadStations();
+    })
+    .catch(error => notify('Could not save the station: ' + error.message, 'error'));
+}
+
+function undoStationAdd(id) {
+    // Answered with inventory_updated (undone) or an error
+    socket.emit('undo_last_add', {station: id});
+}
+
+async function forgetStation(id) {
+    const ok = await confirmDialog({
+        title: 'Forget this station?',
+        message: 'It is removed from this list. The cards it sent stay, and it comes back if it sends another one.',
+        confirmText: 'Forget',
+        danger: true
+    });
+    if (!ok) return;
+    fetch('/api/stations/' + encodeURIComponent(id), {method: 'DELETE'})
+        .then(() => loadStations())
+        .catch(error => notify('Could not forget the station: ' + error.message, 'error'));
 }
 
 function closeSettings() {

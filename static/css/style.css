@@ -576,6 +576,32 @@ body {
     gap: 6px;
 }
 
+/* Settings: a station (a camera elsewhere) - name and location, then its count and actions */
+.station {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.station-fields,
+.station-meta {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.station-meta .hint {
+    flex: 1;
+    margin: 0;
+}
+
+#stations-list + .hint {
+    margin-top: 10px;
+    overflow-wrap: anywhere;
+}
+
 /* .input-group sets display, which would beat the hidden attribute */
 .input-group[hidden] {
     display: none;

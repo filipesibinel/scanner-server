@@ -71,6 +71,8 @@ data/captures/
 data/review/
 data/backups/
 data/scan_inventory.db*
+data/stations.json
+data/pending_captures.db*
 data/uploads/
 data/card_inventory.csv
 data/card_inventory_export_*.csv

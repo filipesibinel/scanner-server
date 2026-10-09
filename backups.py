@@ -179,7 +179,7 @@ def restore(backup_id, inventory, scan_inventory, deck_store):
                     manager.conn.rollback()
                     raise BackupError(f"The restore stopped part way ({e}) - the state from before is in the "
                                       f"backup \"{previous['note']}\"") from e
-            inventory.last_added = scan_inventory.last_added = None
+            inventory.last_added, scan_inventory.last_added = {}, {}
             # Captures deleted since the backup come back with their entries
             CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
             for saved in (folder / 'captures').glob('*'):

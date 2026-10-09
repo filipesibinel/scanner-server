@@ -896,7 +896,28 @@ afterwards). Errors: `400` (bad id, no readable picture), `401` (token), `413` (
 - **Token**: with `stations.token` in `config.yaml` (or `SCANNER_STATION_TOKEN`) set, captures
   need the header `X-Station-Token`. Without it anyone on the network can send cards, like the
   web interface itself.
+- **Asking later**: `GET /api/stations/<id>/captures/<n>` gives the outcome of a capture that
+  was still pending when its upload was answered (`202` while it still is; outcomes of the
+  last 500 station captures are kept in memory, so `404` after a restart).
+- **Undo**: `POST /api/stations/<id>/undo` takes back that station's last automatic add
+  (`InventoryManager.last_added` is kept per source; the scanner page's own Undo is source
+  `None`). Answered to the pages as `inventory_updated` with `station` and `undone`.
 - `GET /api/stations` lists them; `DELETE /api/stations/<id>` forgets one (its cards stay).
+- **Settings → Stations** on the scanner page: rename a station, set its location, undo its
+  last card (Socket.IO `undo_last_add` with `station`), forget it. A station's adds don't touch
+  the page's card panel - they show in the activity log (`inventory_updated` carries
+  `station`); a review item says which station it came from.
+
+**Captures survive a restart.** Every capture that goes into the queues - a station's, or the
+scanner page's when adding automatically - is on record in `data/pending_captures.db`
+(`pending.py`, written by `submit_capture`) from the moment it is accepted until it is added or
+in the review queue; its image is in `scanned_cards/` (a separate foil image as
+`<name>_foil.jpg`, deleted afterwards). At startup `resume_pending` queues what is still on
+record. Measured 2026-10-08: container killed (`docker kill`) with 110 captures on record;
+after the restart all were added, 120 cards for 119 accepted uploads. It is "at least once":
+the extra card is an upload recorded just before the kill whose answer never reached the
+sender, or a card added just before the kill and not yet taken off the record (then added
+again). A station that got no answer and sends the picture again adds the card twice too.
 
 Measured 2026-10-08 (server in Docker, OCR on an RTX 4070 Ti SUPER, a laptop on Wi-Fi sending
 recorded captures): one station at a card every 2.5 s - 30 of 30 added, 29 by OCR in 0.34 s
@@ -919,6 +940,7 @@ Socket.IO events:
 | `toggle_auto_capture`, `toggle_fast_scan` (add automatically), `toggle_detection`, `toggle_ocr` (read with OCR first), `toggle_debug_trace`, `toggle_debug_mode` (Flask's debug mode, for the next start), `reset_focus` (refocus + lock), `set_autofocus`, `set_fixed_area` (`enabled` / `area` / `use_detected`), `set_camera_rotation`, `set_refocus_every` (`captures`: focus probe interval) | `auto_capture_triggered` (image taken, focus probe done: drop the next card), `processing_queue_update`, `*_toggled`, `focus_reset`, `fixed_area_updated`, `camera_rotation_updated`, `refocus_every_updated` |
 | `set_ai_provider`, `save_ai_credential`, `update_database` (the active game's data), `rebuild_database` | `ai_provider_set`, `ai_credential_saved`, `database_update_progress` / `_complete` / `_error`, `database_update_available` (update check found newer data), `database_rebuild_*`, `log`, `error` |
 | `save_prompt` (scope `model` / `all`), `reset_prompt`, `test_prompt` | `prompts_updated`, `prompt_test_result` (sent only to the client that asked) |
+| `undo_last_add` with `station` (Settings → Stations) | `inventory_updated` with `station` (the station's name) for a station's add or undo (`undone`): logged, the card panel stays |
 | `review_open`, `review_skip`, `review_close` | `review_item` (the oldest item, or `id: null` when empty), `review_queue_update` (count; `queued: true` when a card was just queued - the page plays the queue alert) |
 | `set_game` | `game_changed` (to every client; stops auto scanning; downloads the game's card data if it has none). Captures still waiting for the AI keep their game (`game` on the queue item, `game_id` in `route_identified`): they are not looked up as cards of the new game but go, unread, to their own game's review queue |
 
@@ -949,6 +971,8 @@ one game exists. Card payloads may carry `finish_options` (only those finishes a
 | `data/captures/` | Thumbnails of the captures behind inventory entries (deleted with their entry) |
 | `data/backups/` | Backups made on the collection page (`<date_time>/`, see Backups); copies of the inventory table made before a migration rebuilds it (`inventory_before_*.db`) |
 | `data/scan_inventory.db` | Cards scanned and not yet added to the collection |
+| `data/stations.json` | The stations: name, location, capture count, last seen |
+| `data/pending_captures.db` | Captures waiting in the OCR / AI queues, queued again after a restart |
 | `data/cards_database.db` | Card data (`cards`, `card_data_info`), inventory, decks (`decks`, `deck_cards`) and answers cached from other sites (`web_cache`) |
 | `data/logs/` | `app.log`, `ai.log`, `scanner.log`, `database.log`, `scanned_cards.log` (one CSV line per identified card; the model column says `light-ocr` when OCR read it), `ocr.log` (errors of the OCR reader process) |
 | `scanned_cards/` | Captured images (deleted after `cleanup.days`) |

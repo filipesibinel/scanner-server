@@ -6,6 +6,7 @@ Main Flask application with SocketIO - COMPLETE VERSION
 
 from flask import Flask, render_template, Response, jsonify, request, send_file, send_from_directory
 from flask_socketio import SocketIO, emit
+import collections
 import csv
 import hmac
 import cv2
@@ -205,6 +206,7 @@ from scanner import CardScanner
 from card_ocr import CardOcr
 from identification import Identification
 from stations import Stations
+from pending import PendingCaptures
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -228,6 +230,10 @@ SCAN_INVENTORY_FILE = Config.DATA_DIR / 'scan_inventory.db'
 scanner = None
 identification = None     # identification.Identification: OCR, vision AI and their queues
 stations = None           # stations.Stations: cameras elsewhere that send their captures here
+pending = None            # pending.PendingCaptures: captures in the queues, on disk until settled
+# What became of the stations' last few hundred captures: {(station id, capture number): outcome}
+capture_outcomes = collections.OrderedDict()
+capture_outcomes_lock = threading.Lock()
 debug_mode_running = Config.DEBUG  # Flask's debug mode as this process was started (main)
 database = None
 inventory = None           # the collection (table inventory in the card database file)
@@ -385,13 +391,13 @@ def add_automatically(game, card, image_path, foil, station=None, captured_at=No
     Done here rather than by the page, so it doesn't depend on a page being open (or running
     the current script - an old tab once sent every add without its card).
     station: where it was captured, when not at the scanner page's camera - its location is
-    used if it has one. Returns what was added (added_payload).
+    used if it has one, and the add is that station's to undo. Returns what was added (added_payload).
     """
     finish = game.suggested_finish(card, foil)
     location = (station or {}).get('location')
     row_id = scan_inventory.add_card(game.inventory_fields(card, finish), game.id, finish, 'Near Mint', 1,
                                      capture=image_path, location=scan_location() if location is None else location,
-                                     when=captured_at)
+                                     when=captured_at, source=station['id'] if station else None)
     added = added_payload(game, card, finish, 1)
     socketio.emit('inventory_updated', {'auto': True, 'stats': scan_inventory.get_stats(game.id), 'added': added,
                                         'station': station['name'] if station else None}, namespace='/')
@@ -501,9 +507,85 @@ def announce_and_route(image_path, card_info, card_number, game_id, processing_t
     return outcome
 
 
+def read_rgb(path):
+    """An image file as an RGB array, or None"""
+    image = cv2.imread(str(path)) if path and Path(path).is_file() else None
+    return None if image is None else cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+
+def foil_file(image_path):
+    """Where a capture's perspective-corrected card is kept while it waits to be read"""
+    image_path = Path(image_path)
+    return image_path.with_name(f"{image_path.stem}_foil.jpg")
+
+
+def submit_capture(image_path, image, foil_image, number, game_id, station=None, captured_at=None, on_outcome=None,
+                   foil_path=None, pending_id=None):
+    """
+    Queue a saved capture to be read (identification.py) and then added or queued for review,
+    as when adding automatically. It is on record (pending.py) until it is settled, so a
+    restart picks it up again.
+    foil_path: the file of foil_image when that is another picture than the card image;
+    on_outcome(outcome): called with route_identified's outcome ('seconds' added);
+    pending_id: the capture is on record already (resume_pending)
+    """
+    captured_at = captured_at or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    if pending_id is None:
+        pending_id = pending.add(game_id, station['id'] if station else None, number, Path(image_path).name,
+                                 Path(foil_path).name if foil_path else None, foil_image is image, captured_at)
+    queue_changed(+1)
+
+    def identified(card_info, seconds):
+        try:
+            outcome = announce_and_route(image_path, card_info, number, game_id, seconds, fast=True,
+                                         station=station, captured_at=captured_at)
+            outcome['seconds'] = round(seconds, 2)
+        except Exception as e:
+            # Off the record all the same: queued again at every start, it would fail every time
+            logger.exception(f"Capture {Path(image_path).name} could not be added or queued for review: {e}")
+            log_to_client(f"{station_prefix(station)}Capture {Path(image_path).name} failed: {e}", level="error")
+            outcome = {'status': 'error', 'message': str(e)}
+        finally:
+            pending.remove(pending_id)
+            if foil_path:
+                Path(foil_path).unlink(missing_ok=True)
+            queue_changed(-1)
+        if station:
+            with capture_outcomes_lock:
+                capture_outcomes[(station['id'], number)] = outcome
+                while len(capture_outcomes) > 500:
+                    capture_outcomes.popitem(last=False)
+        if on_outcome:
+            on_outcome(outcome)
+
+    identification.submit(image, foil_image, game_id, identified)
+
+
+def resume_pending():
+    """Captures that were waiting to be read when the server stopped are queued again"""
+    rows = pending.all()
+    if not rows:
+        return
+    log_to_client(f"Reading {len(rows)} capture(s) that were waiting when the scanner stopped")
+    for row in rows:
+        image_path = Config.IMAGES_DIR / row['image']
+        image = read_rgb(image_path)
+        if image is None:
+            logger.warning(f"Waiting capture {row['image']} is gone - dropped")
+            pending.remove(row['id'])
+            continue
+        foil_path = Config.IMAGES_DIR / row['foil_image'] if row['foil_image'] else None
+        foil_image = image if row['foil_is_image'] else read_rgb(foil_path)
+        station = None
+        if row['station']:  # a station forgotten meanwhile still gets its card in
+            station = stations.get(row['station']) or {'id': row['station'], 'name': row['station'], 'location': None}
+        submit_capture(image_path, image, foil_image, row['number'], row['game'], station, row['captured_at'],
+                       foil_path=foil_path, pending_id=row['id'])
+
+
 def initialize_components():
     """Initialize all components"""
-    global scanner, identification, stations, database, inventory, scan_inventory, review, deck_store, recommend
+    global scanner, identification, stations, pending, database, inventory, scan_inventory, review, deck_store, recommend
 
     logger.info("Initializing components...")
 
@@ -538,6 +620,7 @@ def initialize_components():
     inventory.finish_interrupted_moves(scan_inventory)  # an "Add to collection" cut short by a crash
     review = ReviewQueue()
     stations = Stations()
+    pending = PendingCaptures()
     deck_store = DeckManager()
     recommend = Recommendations()
 
@@ -580,7 +663,7 @@ def initialize_components():
         auto_capture_counter += 1
 
         queue_changed(+1)
-        queued = False  # handed to the identification queues, which count it off when done
+        queued = False  # handed on to submit_capture, which keeps its own count
         try:
             # Capture fast scan mode state at time of capture (not current state)
             was_fast_scan_mode = scanner.fast_scan_mode if scanner and hasattr(scanner, 'fast_scan_mode') else False
@@ -600,15 +683,15 @@ def initialize_components():
             if was_fast_scan_mode:
                 # Adding automatically: the card is read in the background (OCR, then the AI
                 # for what OCR can't settle) and the scanner is ready for the next drop
-                def identified(card_info, seconds):
-                    try:
-                        announce_and_route(image_path, card_info, current_capture_number, game_id, seconds, fast=True)
-                        logger.info(f"Fast Scan Mode: Card #{current_capture_number} done in {seconds:.1f}s")
-                    finally:
-                        queue_changed(-1)
-
-                identification.submit(card_image_rgb, foil_image, game_id, identified)
+                foil_path = None
+                if foil_image is not None and foil_image is not card_image_rgb:
+                    # Fixed area: the capture is the area, the foil check uses the outlined card
+                    foil_path = foil_file(image_path)
+                    cv2.imwrite(str(foil_path), cv2.cvtColor(foil_image, cv2.COLOR_RGB2BGR))
+                submit_capture(image_path, card_image_rgb, foil_image, current_capture_number, game_id,
+                               foil_path=foil_path)
                 queued = True
+                queue_changed(-1)
                 scanner.card_under_review = False
                 logger.info(f"Fast Scan Mode: Card #{current_capture_number} captured and queued "
                             f"(waiting for OCR / AI: {identification.waiting()}) - ready for next capture in {Config.AUTO_CAPTURE_DELAY}s")
@@ -632,6 +715,8 @@ def initialize_components():
 
     scanner.auto_capture_callback = handle_auto_capture
     logger.info("Auto-capture callback registered")
+
+    resume_pending()
 
     logger.info("All components initialized successfully!")
     log_to_client("All components initialized successfully", level="success")
@@ -1519,7 +1604,7 @@ def precon_own(file_name):
         added += entry['quantity']
         deck_entries.append({'name': card['name'], 'card_id': card['id'], 'quantity': entry['quantity'],
                              'board': entry['board']})
-    inventory.last_added = None  # Undo takes back one add, not a whole deck
+    inventory.last_added = {}  # Undo takes back one add, not a whole deck
     deck_id = deck_store.create(game.id, name, precon['format'])
     deck_store.import_cards(deck_id, deck_entries)
     log_to_client(f"Added to inventory: {added} cards of {precon['name']}"
@@ -1651,6 +1736,20 @@ STATION_CAPTURE_MAX_BYTES = 30 * 1024 * 1024  # a card image and its foil image
 STATION_CAPTURE_WAIT = 30  # seconds a station waits for its card's outcome unless it says otherwise
 
 
+def station_token_ok():
+    """Whether a station's request carries the token (when one is set: stations.token)"""
+    return not Config.STATION_TOKEN or hmac.compare_digest(request.headers.get('X-Station-Token', ''),
+                                                           Config.STATION_TOKEN)
+
+
+def save_upload(path, data, image):
+    """Keep an uploaded picture as a JPEG: the station's own bytes when it sent one"""
+    if data[:2] == b'\xff\xd8':
+        path.write_bytes(data)
+    else:
+        cv2.imwrite(str(path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+
+
 def decode_upload(file):
     """(bytes, RGB image) of an uploaded picture, or (None, None)"""
     data = file.read() if file else b''
@@ -1692,15 +1791,14 @@ def station_capture(station_id):
     """
     if not Stations.valid_id(station_id):
         return jsonify({'success': False, 'message': 'Station ids are 1-40 letters, digits, - or _'}), 400
-    if Config.STATION_TOKEN and not hmac.compare_digest(request.headers.get('X-Station-Token', ''),
-                                                        Config.STATION_TOKEN):
+    if not station_token_ok():
         return jsonify({'success': False, 'message': 'Wrong or missing station token'}), 401
     if (request.content_length or 0) > STATION_CAPTURE_MAX_BYTES:
         return jsonify({'success': False, 'message': 'Capture too large'}), 413
     data, image = decode_upload(request.files.get('image'))
     if image is None:
         return jsonify({'success': False, 'message': "No readable picture in 'image'"}), 400
-    _, foil_image = decode_upload(request.files.get('foil_image'))
+    foil_data, foil_image = decode_upload(request.files.get('foil_image'))
     try:
         wait = max(0.0, min(float(request.form.get('wait', STATION_CAPTURE_WAIT)), 120.0))
     except ValueError:
@@ -1708,33 +1806,60 @@ def station_capture(station_id):
 
     station = stations.capture(station_id, request.form.get('name'))
     number = station['captures']
-    captured_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     image_path = Config.IMAGES_DIR / f"{station_id}_{number}_{int(time.time())}.jpg"
-    if data[:2] == b'\xff\xd8':
-        image_path.write_bytes(data)  # the station's JPEG as it is
-    else:
-        cv2.imwrite(str(image_path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+    save_upload(image_path, data, image)
+    foil_path = None
+    if foil_image is not None:
+        foil_path = foil_file(image_path)
+        save_upload(foil_path, foil_data, foil_image)
 
-    game_id = games.active_id()
     outcome, done = {}, threading.Event()
 
-    def identified(card_info, seconds):
-        try:
-            outcome.update(announce_and_route(image_path, card_info, number, game_id, seconds, fast=True,
-                                              station=station, captured_at=captured_at))
-            outcome['seconds'] = round(seconds, 2)
-        except Exception as e:
-            logger.exception(f"Station capture {image_path.name} failed: {e}")
-            outcome.update(status='error', message=str(e))
-        finally:
-            queue_changed(-1)
-            done.set()
+    def settled(result):
+        outcome.update(result)
+        done.set()
 
-    queue_changed(+1)
-    identification.submit(image, foil_image, game_id, identified)
+    submit_capture(image_path, image, foil_image, number, games.active_id(), station, on_outcome=settled,
+                   foil_path=foil_path)
     if not done.wait(wait):
         return jsonify({'success': True, 'capture': number, 'status': 'pending'}), 202
     return jsonify({'success': outcome.get('status') != 'error', 'capture': number, **outcome})
+
+
+@app.route('/api/stations/<station_id>/captures/<int:number>')
+def station_capture_outcome(station_id, number):
+    """What became of a capture that was still pending when its upload was answered"""
+    if not station_token_ok():
+        return jsonify({'success': False, 'message': 'Wrong or missing station token'}), 401
+    with capture_outcomes_lock:
+        outcome = capture_outcomes.get((station_id, number))
+    if outcome is not None:
+        return jsonify({'success': outcome.get('status') != 'error', 'capture': number, **outcome})
+    if pending.has(station_id, number):
+        return jsonify({'success': True, 'capture': number, 'status': 'pending'}), 202
+    return jsonify({'success': False, 'message': 'No such capture (outcomes are kept for the last few hundred)'}), 404
+
+
+def undo_station_add(station):
+    """Take back a station's most recent automatic add. Returns the card's name, or None"""
+    name = scan_inventory.undo_last_add(source=station['id'])
+    if name:
+        log_to_client(f"{station_prefix(station)}Removed {name} from the scanned cards (undo)", level="warning")
+        socketio.emit('inventory_updated', {'auto': True, 'stats': scan_inventory.get_stats(games.active_id()),
+                                            'station': station['name'], 'undone': name}, namespace='/')
+    return name
+
+
+@app.route('/api/stations/<station_id>/undo', methods=['POST'])
+def station_undo(station_id):
+    """A station takes back its last card"""
+    if not station_token_ok():
+        return jsonify({'success': False, 'message': 'Wrong or missing station token'}), 401
+    station = stations.get(station_id)
+    if station is None:
+        return jsonify({'success': False, 'message': 'No such station'}), 404
+    name = undo_station_add(station)
+    return jsonify({'success': bool(name), 'name': name, 'message': None if name else 'Nothing to undo'})
 
 
 @app.route('/api/detection_status')
@@ -2103,6 +2228,7 @@ def handle_review_open(data=None):
         'image_url': f"/review_images/{item['file']}" if item['file'] else None,
         'ai': {'name': item['ai_name'], 'number': item['ai_number'], 'set': item['ai_set'], 'foil': item['foil']},
         'captured_at': item['created_at'],
+        'station': (stations.get(item['station']) or {'name': item['station']})['name'] if item.get('station') else None,
         'card': game.card_payload(card) if card else None,
     })
 
@@ -2144,10 +2270,17 @@ def review_image(name):
 
 
 @socketio.on('undo_last_add')
-def handle_undo_last_add():
-    """Take back the most recent add to the inventory"""
+def handle_undo_last_add(data=None):
+    """Take back the most recent add to the inventory - with data['station'], that station's"""
     if not inventory:
         emit('error', {'message': 'Inventory not initialized'})
+        return
+
+    station_id = (data or {}).get('station')
+    if station_id:
+        station = stations.get(station_id)
+        if not (station and undo_station_add(station)):
+            emit('error', {'message': 'Nothing to undo for this station'})
         return
 
     undone = scan_inventory.undo_last_add()

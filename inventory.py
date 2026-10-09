@@ -144,7 +144,9 @@ class InventoryManager:
         self.db_file = db_file or Config.DATABASE_FILE
         self.log_callback = log_callback
         self._lock = threading.RLock()
-        self.last_added = None  # (row id, quantity) of the most recent add_card, for undo
+        # Most recent add_card of each source, for undo: {source: (row id, quantity, capture id)}.
+        # source None is the scanner page; a station (stations.py) is its id
+        self.last_added = {}
         self.conn = sqlite3.connect(str(self.db_file), check_same_thread=False, timeout=10.0)
         self.conn.execute('PRAGMA journal_mode=WAL')
         self.conn.execute('PRAGMA synchronous=NORMAL')
@@ -337,13 +339,14 @@ class InventoryManager:
         return result
 
     def add_card(self, fields, game, finish, condition='Near Mint', quantity=1, capture=None, location='',
-                 quiet=False, when=None):
+                 quiet=False, when=None, source=None):
         """
         Add copies of a printing (fields from Game.inventory_fields) - merged with an existing
         entry for the same card, set, number, condition, finish and location. capture: the
         scanned image of the card, kept as a thumbnail with the entry. when: the time the card
         was captured ('YYYY-MM-DD HH:MM:SS'), when it is added later than that - cards read by
-        the AI are added after cards dropped later, and the list is in dropping order.
+        the AI are added after cards dropped later, and the list is in dropping order. source:
+        who adds it, for undo_last_add (a station's id; None: the scanner page).
         """
         quantity = max(1, int(quantity or 1))
         values = {
@@ -369,7 +372,7 @@ class InventoryManager:
                     'INSERT INTO inventory_captures (inventory_id, file, captured_at) VALUES (?, ?, ?)',
                     (row['id'], thumbnail, values['timestamp'])).lastrowid
             self.conn.commit()
-            self.last_added = (row['id'], quantity, capture_id)
+            self.last_added[source] = (row['id'], quantity, capture_id)
         if not quiet:
             self.log(f"Added to inventory: {quantity}x {values['card_name']} ({finish}) - "
                      f"${values['price_usd'] * row['quantity']:.2f} for {row['quantity']}", level="success")
@@ -380,16 +383,15 @@ class InventoryManager:
             self.conn.execute('UPDATE inventory SET price_usd = ? WHERE id = ?', (float(price), row_id))
             self.conn.commit()
 
-    def undo_last_add(self):
+    def undo_last_add(self, source=None):
         """
-        Take back the most recent add_card: lower that entry's quantity by the amount
-        added, deleting it if nothing is left. Returns the card name, or None.
+        Take back the most recent add_card of a source (see add_card): lower that entry's
+        quantity by the amount added, deleting it if nothing is left. Returns the card name, or None.
         """
         with self._lock:
-            if not self.last_added:
+            if source not in self.last_added:
                 return None
-            row_id, quantity, capture_id = self.last_added
-            self.last_added = None
+            row_id, quantity, capture_id = self.last_added.pop(source)
             row = self.conn.execute('SELECT card_name FROM inventory WHERE id = ?', (row_id,)).fetchone()
             if not row:
                 return None
@@ -700,7 +702,7 @@ class InventoryManager:
         source.conn.execute('DELETE FROM inventory WHERE game = ?', (game,))
         source.conn.execute('DELETE FROM pending_moves WHERE game = ?', (game,))
         source.conn.commit()
-        source.last_added = None
+        source.last_added = {}
 
     def finish_interrupted_moves(self, source):
         """
@@ -755,7 +757,7 @@ class InventoryManager:
                     self._trim_captures(row['id'], row['quantity'] - added)
             self._drop_orphan_captures()
             self.conn.commit()
-            self.last_added = None
+            self.last_added = {}
         self.log(f"Removed the cards added {added_at}: {cards} cards ({entries} entries)", level="success")
         return {'entries': entries, 'cards': cards}
 
@@ -767,7 +769,7 @@ class InventoryManager:
                 deleted = self.conn.execute(f'DELETE FROM inventory {where}', params).rowcount
                 self._drop_orphan_captures()
                 self.conn.commit()
-                self.last_added = None
+                self.last_added = {}
             self.log(f"Inventory cleared: {deleted} entries removed", level="success")
             return {'success': True, 'deleted': deleted}
         except Exception as e:
@@ -800,7 +802,7 @@ class InventoryManager:
             if replace_existing:
                 self.conn.execute('DELETE FROM inventory WHERE game = ?', (game,))
                 self._drop_orphan_captures()
-                self.last_added = None
+                self.last_added = {}
             for entry in entries:
                 fields = entry['fields']
                 values = {
@@ -846,7 +848,7 @@ class InventoryManager:
             if replace_existing:
                 self.conn.execute('DELETE FROM inventory WHERE game = ?', (game,))
                 self._drop_orphan_captures()
-                self.last_added = None
+                self.last_added = {}
             imported_at = now()
             with open(csv_file_path, newline='') as f:
                 for row_number, row in enumerate(csv.DictReader(f), start=2):
