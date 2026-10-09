@@ -37,11 +37,14 @@ class ReviewQueue:
                     foil TEXT,              -- foil / non-foil / unknown (the star/dot marker)
                     card_id TEXT,           -- best match, if any
                     match TEXT,             -- how it was matched (Game.confirmed_matches)
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    station TEXT            -- stations.py id the capture came from (NULL: the scanner page's camera)
                 )''')
+            if 'station' not in {row['name'] for row in self.conn.execute('PRAGMA table_info(review_queue)')}:
+                self.conn.execute('ALTER TABLE review_queue ADD COLUMN station TEXT')
             self.conn.commit()
 
-    def add(self, game, image_path, name='', number='', set_code='', foil='unknown', card=None):
+    def add(self, game, image_path, name='', number='', set_code='', foil='unknown', card=None, station=None):
         """Queue a capture; returns the item id"""
         file = None
         if image_path:
@@ -54,11 +57,11 @@ class ReviewQueue:
                 file = None
         with self._lock:
             item_id = self.conn.execute(
-                'INSERT INTO review_queue (game, file, ai_name, ai_number, ai_set, foil, card_id, match, created_at) '
-                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                'INSERT INTO review_queue (game, file, ai_name, ai_number, ai_set, foil, card_id, match, created_at, '
+                'station) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 (game, file, name or '', number or '', set_code or '', foil or 'unknown',
                  card['id'] if card else None, card.get('match') if card else None,
-                 datetime.now().strftime('%Y-%m-%d %H:%M:%S'))).lastrowid
+                 datetime.now().strftime('%Y-%m-%d %H:%M:%S'), station)).lastrowid
             self.conn.commit()
         return item_id
 

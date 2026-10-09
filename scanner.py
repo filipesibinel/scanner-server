@@ -18,10 +18,6 @@ import re
 from datetime import datetime
 from config import Config
 from object_detector import ObjectDetector, warp_card
-from card_identifier import CardIdentifier
-from card_ocr import CardOcr
-import games
-import prompts
 from settings import Settings
 
 # Create scanner logger
@@ -84,7 +80,7 @@ def focus_sweep(set_focus, measure_sharpness, low, high, coarse_step=50, fine_st
 class CardScanner:
     """Handles camera operations and card scanning"""
     
-    def __init__(self, log_callback=None):
+    def __init__(self, log_callback=None, settings=None):
         self.log_callback = log_callback
         self.camera = None
         self.camera_type = None
@@ -124,40 +120,7 @@ class CardScanner:
         self.awaiting_new_card = False
 
         # User settings
-        self.settings = Settings()
-
-        # Vision AI for card identification
-        self.card_identifier = None
-        if Config.VISION_AI_ENABLED:
-            # Load saved provider and model from settings
-            saved_provider = self.settings.get_ai_provider()
-            saved_model = self.settings.get_ai_model()
-            try:
-                self.card_identifier = CardIdentifier(
-                    provider=saved_provider,
-                    model=saved_model,
-                    log_callback=log_callback
-                )
-                self.log(f"Initialized AI with saved settings: {saved_provider} ({saved_model or 'default'})", level="info")
-            except Exception as e:
-                # Fallback to config default if saved settings fail
-                self.log(f"Failed to load saved AI settings, using config defaults: {e}", level="warning")
-                try:
-                    self.card_identifier = CardIdentifier(
-                        provider=Config.VISION_AI_PROVIDER,
-                        log_callback=log_callback
-                    )
-                    self.log(f"Vision AI enabled ({Config.VISION_AI_PROVIDER})", level="success")
-                except Exception as e:
-                    self.log(f"Vision AI initialization failed: {e}", level="warning")
-                    self.log("Continuing without AI identification", level="warning")
-
-        # light-ocr reads each card first; the vision AI is asked only when that read isn't
-        # a confirmed match (identify_card_from_image)
-        self.card_ocr = CardOcr(log_callback=log_callback)
-        self.ocr_enabled = bool(self.settings.get('ocr_first', True))
-        if self.ocr_enabled:
-            self.card_ocr.warm_up()
+        self.settings = settings or Settings()
 
         # Detection settings
         self.enable_detection = True  # Toggle auto-detection
@@ -204,7 +167,6 @@ class CardScanner:
         self.last_auto_capture_time = 0
         self.auto_capture_callback = None
         self.card_under_review = False  # Prevent auto-capture while card is being reviewed
-        self.last_capture = None  # (card image RGB, foil image or None) of the last capture - prompt editor tests
         self.capture_pending = False  # Auto-capture triggered, image / focus probe not done yet
         # Image rotation (degrees clockwise), applied as each frame is decoded - live and full size
         self.rotation = int(self.settings.get('camera_rotation', Config.CAMERA_ROTATE) or 0)
@@ -795,66 +757,6 @@ class CardScanner:
         if self.running:
             self._open_camera()
 
-    def set_ai_provider(self, provider, model=None):
-        """
-        Dynamically change the AI provider and/or model for card identification
-
-        Args:
-            provider: 'gemini', 'openai', or 'anthropic'
-            model: Specific model to use (optional, uses default if not specified)
-
-        Returns:
-            dict: {'success': bool, 'message': str, 'model': str}
-        """
-        provider = provider.lower()
-        valid_providers = list(CardIdentifier.AVAILABLE_MODELS.keys())
-
-        if provider not in valid_providers:
-            return {
-                'success': False,
-                'message': f"Invalid provider '{provider}'. Must be one of: {', '.join(valid_providers)}"
-            }
-
-        try:
-            # Create new CardIdentifier with the specified provider and model
-            new_identifier = CardIdentifier(
-                provider=provider,
-                model=model,
-                log_callback=self.log_callback
-            )
-
-            # If successful, replace the old identifier
-            self.card_identifier = new_identifier
-            new_identifier.warm_up()
-
-            # Save the selection to settings for persistence
-            self.settings.set_ai_provider(provider, model)
-
-            # Update the config for consistency (optional, doesn't persist across restarts)
-            Config.VISION_AI_PROVIDER = provider
-
-            message = f"AI provider changed to {provider} ({new_identifier.model})"
-            self.log(message, level="success")
-            return {
-                'success': True,
-                'message': message,
-                'model': new_identifier.model
-            }
-        except ValueError as e:
-            # API key not found or invalid model
-            self.log(f"Failed to change AI provider: {e}", level="error")
-            return {
-                'success': False,
-                'message': str(e)
-            }
-        except Exception as e:
-            # Other errors
-            self.log(f"Error changing AI provider: {e}", level="error")
-            return {
-                'success': False,
-                'message': f"Error: {str(e)}"
-            }
-
     def _initialize_usb_camera(self):
         """Initialize USB camera using OpenCV, setting high resolution and focus settings"""
         # CRITICAL: Use V4L2 backend directly instead of GStreamer
@@ -1352,89 +1254,8 @@ class CardScanner:
         card_bgr = cv2.cvtColor(card_image, cv2.COLOR_RGB2BGR)
         cv2.imwrite(str(image_path), card_bgr)
 
-        self.last_capture = (card_image, foil_image)
         self.log(f"Card captured: {image_path.name}")
         return image_path, card_image, foil_image
-
-    def identify_card_from_image(self, card_image_rgb, foil_image=None):
-        """
-        Identify a card from a preprocessed RGB image: light-ocr first (when switched on), and
-        the vision AI when OCR's read isn't a confirmed match (measured on 747 scans: OCR alone
-        confirmed 82% in 0.16 s each, the AI 95% in ~1 s; OCR first with the AI behind it 95%).
-        foil_image: perspective-corrected card to read the star/dot foil marker from (its
-        corner is at a known position); no AI foil check without it.
-        Returns: card_info dict with name, collector_number, foil ('foil'|'non-foil'|'unknown'),
-        and 'reader' when it wasn't the vision AI that read the card
-        This is used for async AI processing.
-        """
-        ai_foil_check = (self.card_identifier and foil_image is not None and Config.VISION_AI_DETECT_FOIL
-                         and prompts.has('foil', games.active_id()))
-
-        ocr_info = None
-        if self.ocr_enabled:
-            ocr_info = self.card_ocr.read_card(card_image_rgb, games.active_id())
-            if ocr_info and games.active().confirmed_read(ocr_info['name'], ocr_info['collector_number'],
-                                                         ocr_info['set_code']):
-                # OCR misses the marker on about a third of the foils: ask the AI about those
-                if ocr_info['foil'] == 'unknown' and ai_foil_check:
-                    ocr_info['foil'] = self.card_identifier.read_foil_symbol(foil_image)
-                self.log(f"✓ Card identified by OCR: {ocr_info['name']} #{ocr_info['collector_number']}", level="success")
-                return ocr_info
-            if ocr_info and self.card_identifier:
-                self.log("OCR read is not a confirmed match - asking the vision AI")
-
-        card_info = None
-        if self.card_identifier:
-            self.log("Identifying card with Vision AI...")
-            # The foil check runs alongside the identification (saves ~0.3 s per card with
-            # Ollama, more with cloud providers that serve requests in parallel)
-            foil_result = {}
-            foil_thread = None
-            if ai_foil_check and (not ocr_info or ocr_info['foil'] == 'unknown'):
-                foil_thread = threading.Thread(
-                    target=lambda: foil_result.update(foil=self.card_identifier.read_foil_symbol(foil_image)),
-                    daemon=True)
-                foil_thread.start()
-            card_info = self.card_identifier.identify_card(card_image_rgb)
-            if foil_thread:
-                foil_thread.join(timeout=60)
-            # A marker OCR did read stands (it agreed with the AI on 480 of 481 scans)
-            foil = foil_result.get('foil') or (ocr_info or {}).get('foil') or 'unknown'
-
-            if card_info and card_info.get('name'):
-                name = card_info['name']
-                number = card_info.get('collector_number', '')
-                if number:
-                    self.log(f"✓ Card identified: {name} #{number}", level="success")
-                else:
-                    self.log(f"✓ Card identified: {name} (no collector number)", level="success")
-
-                card_info['foil'] = foil
-            else:
-                self.log("Vision AI could not identify card", level="warning")
-                if ocr_info:
-                    # Better than nothing: the name OCR read still finds the card for review
-                    ocr_info['foil'] = foil
-                    card_info = ocr_info
-        elif ocr_info:
-            card_info = ocr_info
-        else:
-            self.log("⚠ Vision AI not enabled - set API key to enable automatic identification", level="warning")
-
-        return card_info
-
-    def capture_card_image(self, card_number):
-        """
-        Capture a still image of the card and identify it with AI (SYNCHRONOUS).
-        This is the original method used for manual capture and Normal Auto-Scan Mode.
-        Returns: (image_path, card_info)
-        """
-        image_path, card_image, foil_image = self.capture_card_image_only(card_number)
-        if image_path is None:
-            return None, None
-
-        card_info = self.identify_card_from_image(card_image, foil_image)
-        return image_path, card_info
 
     def _run_v4l2_command(self, *args):
         """Run a v4l2-ctl command"""
@@ -1639,20 +1460,9 @@ class CardScanner:
         self.enable_detection = enabled
         self.log(f"Card detection {'enabled' if enabled else 'disabled'}")
 
-    def set_ocr_enabled(self, enabled):
-        """Read cards with light-ocr before asking the vision AI (remembered)"""
-        self.ocr_enabled = enabled
-        self.settings.set('ocr_first', enabled)
-        if enabled:
-            self.card_ocr.warm_up()
-        else:
-            self.card_ocr.stop()
-        self.log(f"Read cards with OCR first: {'on' if enabled else 'off'}")
-
     def cleanup(self):
         """Clean up camera resources"""
         self.running = False
-        self.card_ocr.stop()
         if self.capture_thread:
             self.capture_thread.join(timeout=2)
 

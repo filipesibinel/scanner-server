@@ -424,6 +424,8 @@ endpoints work on the collection; add `?area=scan` for the cards scanned and not
 | `GET /video_feed` | MJPEG stream of the annotated camera view |
 | `GET /api/stats` | Database and inventory statistics |
 | `GET /api/detection_status` | Whether a card is detected and how stable it is |
+| `POST /api/stations/<id>/captures` | A card captured by a station (multipart `image`, optional `foil_image`, `name`, `wait`): read, then added or queued for review - see PROGRAM_DOCUMENTATION.md, Stations |
+| `GET /api/stations`, `PUT` / `DELETE /api/stations/<id>` | The stations; rename one or set its location; forget one |
 | `GET /api/games` | Supported card games (finishes, export formats) and the active one |
 | `GET /api/inventory` | The active game's inventory (each entry has an `id` and its `captures`) |
 | `GET /captures/<file>` | Thumbnail of a capture kept with an inventory entry |

@@ -48,13 +48,15 @@ with a fake camera (patch `detect_camera_type` / `_initialize_usb_camera`).
 | Outline detection, warp | `object_detector.py`: `find_card_outline` (+ `_track_outline` following the previous card, `_outline_from_edge_groups` for broken outlines, `_card_inside_box` when the largest outline is the box itself), `warp_card`, `ObjectDetector.detect` |
 | Capture loop, stability, auto-capture, new-card detection | `scanner.py`: `_capture_frames` (camera missing / lost: `_open_camera`, `_read_failed`, `_wait_for_camera`), `_is_card_settled`, `_new_card_arrived`, `_mark_captured`; fixed area (sleeves): `_fixed_area_step`, `set_fixed_area` |
 | Focus sweep / lock / automatic refocus | `scanner.py`: `focus_sweep`, `refocus`, `_run_focus_sweep`, `_run_focus_probe` (drift tracking between drops), `_move_focus` (approach from below: the lens has play), `_check_focus_drift`, `set_continuous_autofocus` |
-| OCR first (light-ocr reader process, parsers, AI fallback) | `card_ocr.py`: `CardOcr`, `parse_magic`, `PARSERS`; `ocr/server.mjs` (Node.js); `scanner.py`: `identify_card_from_image`; `Game.confirmed_read` |
+| OCR first (light-ocr reader process, parsers, AI fallback) | `card_ocr.py`: `CardOcr`, `parse_magic`, `PARSERS`; `ocr/server.mjs` (Node.js); `Game.confirmed_read` |
+| Reading a card, for every camera: OCR stage, AI stage, their queues and workers, AI provider / OCR switch | `identification.py`: `Identification` (`submit` → `_ocr_worker` → `_ai_worker` → `_done_worker`; `identify` in the caller's thread; `set_ai_provider`, `set_ocr_enabled`, `last_capture`) |
 | AI providers, foil check, Ollama warm-up | `card_identifier.py`: `_ask_*`, `identify_card`, `read_foil_symbol`, `warm_up` |
 | Prompts (built-in + edited per model) | `prompts.py`: `BUILT_IN`, `prompt`, `save`, `reset`; editor events in `app.py` (`save_prompt`, `test_prompt`) |
 | Card games (the active one drives search, finishes, exports / imports per site: `export_formats`, `import_rows`) | `games/`: `base.Game`, `mtg.Magic`, `games.active()`; plan in `MULTI_GAME_IMPLEMENTATION_PLAN.md` |
 | Card data updates (staged import, update check) | `database.py`: `replace_table`, `card_data_info`; `Game.check_for_update`; `app.py`: `start_card_data_update`, `check_card_data_updates` |
 | Card search / printing match / confidence (Magic) | `database.py`: `search_card_exact`, `search_card`, `find_printings`, `CONFIRMED_MATCHES`, `search_key`, `names_match` |
-| Capture orchestration, AI queue, auto-add gate, events | `app.py`: `handle_auto_capture` (in `initialize_components`), `ai_processing_worker`, `search_and_emit_card`, `set_auto_add`; automatic adds on the server (`add_automatically`, `Game.suggested_finish`) |
+| Stations (cameras elsewhere that upload their captures) | `stations.py`: `Stations` (`data/stations.json`); `app.py`: `station_capture`, `station_list`, `station_item` |
+| Capture orchestration, auto-add gate, events | `app.py`: `handle_auto_capture` (in `initialize_components`), `announce_and_route`, `route_identified` (returns the outcome), `search_and_emit_card`, `queue_changed`, `set_auto_add`; automatic adds on the server (`add_automatically`, `Game.suggested_finish`) |
 | Review queue (unconfirmed cards while adding automatically) | `review.py` (`review_queue`, `data/review/`); `app.py`: `queue_for_review`, `review_open`/`review_skip`/`review_close`; `scanner.js`: `renderReview`, `reviewSearch` |
 | Inventory add/merge/undo/split/export, locations and tags, bulk edits, capture thumbnails | `inventory.py` (`KEY_COLUMNS`, `update_card`, `bulk_update`, `inventory_captures`, `data/captures/`); capture → add: `app.py` `pending_capture`, `card['capture']`; `scan_location` |
 | Collection page (`/collection`: inventory filters / grid / bulk bar, deck builder, statistics) | `templates/collection.html`, `static/js/collection.js`, `static/css/collection.css`; shared with the scanner page: `static/js/common.js`, `templates/_topbar.html` (the header of both pages), `templates/_dialogs.html`, `templates/_icons.html` |
@@ -101,7 +103,9 @@ with a fake camera (patch `detect_camera_type` / `_initialize_usb_camera`).
   the wrong printing. Re-run a batch of `scanned_cards/` through `CardOcr.read_card` +
   `Game.confirmed_read` (on a copy of the database) and compare with the AI before loosening it.
 - **Thread safety**: frames/detection state under `scanner.frame_lock`; DB and inventory use
-  their own `RLock`. Auto-capture callbacks and the AI worker run in their own threads.
+  their own `RLock`. Auto-capture callbacks run in their own threads; identified cards come back
+  on `Identification`'s one results thread (`on_done`) - never route a card from the OCR / AI
+  workers themselves. Station captures arrive on request threads, several at once.
 - **Prompts**: change the built-in text in `prompts.py:BUILT_IN` (instructions + fixed
   `answer_format`); the parser relies on the answer format, which the editor cannot change.
   A user's saved prompt in `data/prompts.json` overrides built-in edits - check it when a prompt

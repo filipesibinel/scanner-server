@@ -45,6 +45,9 @@ vision_ai:
   # Longest side (px) of the card image sent for identification. 1024 was as accurate as
   # 2048 and ~35% faster with qwen3.5 (fewer image tokens); 768 lost accuracy
   image_size: 1024
+  # Cards the vision AI works on at the same time (those OCR could not confirm). More only
+  # helps as far as the provider answers requests in parallel (Ollama: OLLAMA_NUM_PARALLEL)
+  workers: 3
 
   # API keys are read from environment variables (GEMINI_API_KEY, OPENAI_API_KEY,
   # ANTHROPIC_API_KEY) - put them in .env (see .env.example)
@@ -53,6 +56,12 @@ vision_ai:
   local:
     endpoint: http://192.168.51.23:11434/v1/chat/completions
     model: qwen3.5:9b  # default until a model is chosen in Settings
+
+# Stations: phones / computers with a camera that capture cards and send them here
+stations:
+  # When set, a station must send this token with each capture (header X-Station-Token).
+  # Also from the environment: SCANNER_STATION_TOKEN
+  token: ""
 
 # Flask Settings
 flask:

@@ -62,6 +62,11 @@ class Config:
     # Ask the AI about the star (foil) / dot marker on outline-detected captures
     VISION_AI_DETECT_FOIL = config.get('vision_ai', 'detect_foil', default=True)
     VISION_AI_IMAGE_SIZE = int(config.get('vision_ai', 'image_size', default=1024))
+    # AI requests running at the same time (identification.py)
+    VISION_AI_WORKERS = int(config.get('vision_ai', 'workers', default=3))
+
+    # Stations (stations.py): when set, captures are only accepted with this token
+    STATION_TOKEN = os.getenv('SCANNER_STATION_TOKEN') or config.get('stations', 'token', default='') or ''
 
     # light-ocr reader (card_ocr.py): auto (GPU when available), cpu or webgpu
     OCR_PROVIDER = config.get('ocr', 'provider', default='auto')

@@ -15,10 +15,11 @@ deployment see [INSTALL.md](INSTALL.md).
 8. [Database](#database)
 9. [Focus](#focus)
 10. [Collection page and decks](#collection-page-and-decks)
-11. [Web interface](#web-interface)
-12. [Configuration and files](#configuration-and-files)
-13. [Performance](#performance)
-14. [Known limitations](#known-limitations)
+11. [Stations](#stations)
+12. [Web interface](#web-interface)
+13. [Configuration and files](#configuration-and-files)
+14. [Performance](#performance)
+15. [Known limitations](#known-limitations)
 
 ## Overview
 
@@ -44,7 +45,9 @@ Design choices:
 
 | Module | Responsibility |
 |---|---|
-| `app.py` | Flask + Socket.IO server: routes, events, capture orchestration, AI worker queue |
+| `app.py` | Flask + Socket.IO server: routes, events, capture orchestration, station captures |
+| `identification.py` | Reading a card, shared by every camera: light-ocr, the vision AI, and the queue in front of each (`Identification`) |
+| `stations.py` | Stations: cameras elsewhere that capture cards themselves and upload them (`data/stations.json`) |
 | `backups.py` | Backups of the collection, the scanned cards and the decks, made and restored on the collection page |
 | `scanner.py` | Camera (USB via OpenCV/V4L2 or Pi camera), capture thread, detection state, stability, auto-capture |
 | `object_detector.py` | Outline detection (`find_card_outline`), perspective warp (`warp_card`) |
@@ -73,7 +76,9 @@ Design choices:
 | Main | Flask + Socket.IO (threading mode) - HTTP routes, Socket.IO events, MJPEG stream |
 | Capture (`scanner._capture_frames`) | Reads frames, detects the card, tracks stability, draws the overlay, triggers auto-captures |
 | Auto-capture callback | One short-lived thread per auto-capture: crops, saves and (in review mode) identifies the card |
-| AI worker (`ai_processing_worker`) | Identifies queued captures one by one when cards are added automatically |
+| OCR worker (`Identification._ocr_worker`) | Reads queued captures with light-ocr, one at a time; passes on what it can't settle |
+| AI workers (`Identification._ai_worker`, `vision_ai.workers`, default 3) | Ask the vision AI about the cards OCR passed on, several at once |
+| Identified worker (`Identification._done_worker`) | Hands each read card back (lookup, add or review queue), one at a time |
 | Background tasks | Card database update/rebuild, startup image cleanup, model warm-up, card data update check (10 s after startup, then daily) |
 
 Frames and detection state are shared under `scanner.frame_lock`; the card database and
@@ -320,7 +325,8 @@ mid-slide.
 ### Adding automatically vs. reviewing
 
 With **Add cards automatically** (default; internally `fast_scan_mode`, saved as `auto_add`):
-the capture is queued, the AI worker identifies it in the background, and a confirmed printing
+the capture is queued, read in the background (`Identification.submit`: OCR, then the AI
+workers - see [The two queues](#the-two-queues)), and a confirmed printing
 is added immediately by the server (`add_automatically`: one Near Mint copy in
 `Game.suggested_finish` - the same rule as the page's `suggestedFinish`), never through the
 current card, so it can't replace a card being reviewed. It used to be the page that sent the
@@ -349,10 +355,31 @@ a card dropped meanwhile is captured right after.
 
 ## Identification (vision AI)
 
+### The two queues
+
+Reading a card is shared by every camera (`identification.py`, one `Identification` in
+`app.py`) and has two stages, each behind its own queue:
+
+1. **OCR** - one worker, because the reader takes one request at a time (0.10 s per card on a
+   GPU). A confirmed read with its foil marker is done here.
+2. **Vision AI** - `vision_ai.workers` (default 3) at once, for what OCR passes on: a read that
+   isn't a confirmed match (or no read at all - full-art and borderless cards), and the foil
+   marker of a confirmed card when OCR missed it.
+
+So a card OCR confirms never waits behind a slow AI answer. Results are handed back by one more
+thread, one card at a time, in the order they are settled - not the order captured.
+`Identification.identify()` runs both stages in the caller's thread (manual capture, and auto
+scanning that waits for Add / Skip). A capture of a game that is no longer the active one is
+passed through unread at either stage (see `route_identified`).
+
+Workers measured 2026-10-08 with Ollama (qwen3.5:9b-q8_0, RTX 4070 Ti SUPER, default
+`OLLAMA_NUM_PARALLEL`), 12 cards: 1 at a time 1.3 cards/s, 2 at a time 1.9, 3 at a time 2.0,
+6 at a time 2.0 - more than 3 workers gains nothing there.
+
 ### OCR first
 
 With *Read with OCR first* on (Settings; `ocr_first` in `data/settings.json`, on by default),
-`scanner.identify_card_from_image()` reads the card with
+`identification.py` reads the card with
 [light-ocr](https://github.com/arcships/light-ocr) (PP-OCRv6, offline) before any AI request:
 
 1. `CardOcr.read_card()` sends the card image to the reader process and gets every text line
@@ -828,6 +855,53 @@ in the box (`identifiers.scryfallId`, else set + number, else any printing of th
 whether it is foil, so the entries get the right set, finish (`Game.suggested_finish`) and
 price; they are Near Mint at the location given (the deck's name by default), which is also how
 to find them again - filter by that location to move or delete them. Undo does not cover it.
+
+## Stations
+
+A station is a camera somewhere else - a phone, a laptop with a webcam - that finds and
+captures the card itself and sends the image to the server, which does everything after that.
+The server needs no camera of its own.
+
+`POST /api/stations/<id>/captures` (multipart; `app.py: station_capture`):
+
+| Field | |
+|---|---|
+| `image` | The card as the station cut it out (JPEG as it is, or PNG) |
+| `foil_image` | Optional: the perspective-corrected card, for the ★/• foil check by the AI |
+| `name` | Optional: what the station calls itself (used until it is renamed on the server) |
+| `wait` | Optional: seconds to wait for the outcome (default 30, at most 120; 0 answers at once) |
+
+`<id>` is chosen and kept by the station (1-40 letters, digits, `-`, `_`); a new id creates the
+station (`stations.py`, `data/stations.json`: name, location, capture count, last seen). The
+image is saved in `scanned_cards/` as `<id>_<n>_<time>.jpg` and goes through the same two
+queues as the scanner page's captures, always as when adding automatically: a confirmed
+printing is added to the scanned cards, anything else goes to the review queue (its row keeps
+the station id in `review_queue.station`). The answer:
+
+```
+{"capture": 12, "status": "added", "seconds": 0.31,
+ "card": {"name": ..., "set": ..., "number": ..., "finish": ..., "quantity": 1},
+ "read": {"name": ..., "number": ..., "set": ..., "foil": ..., "reader": "light-ocr"}}
+{"capture": 13, "status": "review", "reason": "printing not confirmed" | "not found" | "not read" | "game switched", ...}
+```
+
+or `202` with `"status": "pending"` when the card isn't settled within `wait` (it still is,
+afterwards). Errors: `400` (bad id, no readable picture), `401` (token), `413` (over 30 MB).
+
+- **Location**: a station's cards are put in its own location when it has one
+  (`PUT /api/stations/<id>` with `name` / `location`), else in the scanner page's.
+- **Order**: a card the AI had to read is added after cards dropped later that OCR confirmed.
+  The entry gets the time its capture arrived (`add_card(when=...)`), so the scanned list stays
+  in dropping order.
+- **Token**: with `stations.token` in `config.yaml` (or `SCANNER_STATION_TOKEN`) set, captures
+  need the header `X-Station-Token`. Without it anyone on the network can send cards, like the
+  web interface itself.
+- `GET /api/stations` lists them; `DELETE /api/stations/<id>` forgets one (its cards stay).
+
+Measured 2026-10-08 (server in Docker, OCR on an RTX 4070 Ti SUPER, a laptop on Wi-Fi sending
+recorded captures): one station at a card every 2.5 s - 30 of 30 added, 29 by OCR in 0.34 s
+(median, upload included) and 1 by the AI in 1.2 s; four stations at a card every 0.5 s each
+(7.8 cards/s) - 100 of 100 added, OCR median 0.48 s, worst 1.0 s.
 
 ## Web interface
 

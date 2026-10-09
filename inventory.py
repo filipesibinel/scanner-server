@@ -337,11 +337,13 @@ class InventoryManager:
         return result
 
     def add_card(self, fields, game, finish, condition='Near Mint', quantity=1, capture=None, location='',
-                 quiet=False):
+                 quiet=False, when=None):
         """
         Add copies of a printing (fields from Game.inventory_fields) - merged with an existing
         entry for the same card, set, number, condition, finish and location. capture: the
-        scanned image of the card, kept as a thumbnail with the entry.
+        scanned image of the card, kept as a thumbnail with the entry. when: the time the card
+        was captured ('YYYY-MM-DD HH:MM:SS'), when it is added later than that - cards read by
+        the AI are added after cards dropped later, and the list is in dropping order.
         """
         quantity = max(1, int(quantity or 1))
         values = {
@@ -351,7 +353,7 @@ class InventoryManager:
             'type_line': fields.get('type_line'), 'mana_cost': fields.get('mana_cost'),
             'colors': fields.get('colors'), 'color_identity': fields.get('color_identity'),
             'price_usd': float(fields.get('price') or 0), 'quantity': quantity,
-            'condition': condition or 'Near Mint', 'finish': finish, 'timestamp': now(),
+            'condition': condition or 'Near Mint', 'finish': finish, 'timestamp': when or now(),
             'location': (location or '').strip(), 'tags': '',
         }
         values['added_at'] = values['timestamp']

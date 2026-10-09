@@ -7,15 +7,16 @@ Main Flask application with SocketIO - COMPLETE VERSION
 from flask import Flask, render_template, Response, jsonify, request, send_file, send_from_directory
 from flask_socketio import SocketIO, emit
 import csv
+import hmac
 import cv2
 import io
+import numpy as np
 from datetime import datetime
 from pathlib import Path
 import sys
 import time
 import logging
 import threading
-import queue
 from logging.handlers import RotatingFileHandler
 
 from dotenv import load_dotenv
@@ -202,6 +203,8 @@ from cleanup import cleanup_old_images, get_images_stats
 # Import scanner
 from scanner import CardScanner
 from card_ocr import CardOcr
+from identification import Identification
+from stations import Stations
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -223,6 +226,8 @@ SCAN_INVENTORY_FILE = Config.DATA_DIR / 'scan_inventory.db'
 
 # Global instances
 scanner = None
+identification = None     # identification.Identification: OCR, vision AI and their queues
+stations = None           # stations.Stations: cameras elsewhere that send their captures here
 debug_mode_running = Config.DEBUG  # Flask's debug mode as this process was started (main)
 database = None
 inventory = None           # the collection (table inventory in the card database file)
@@ -238,12 +243,17 @@ recommend = None          # recommendations.Recommendations
 # card is found by a manual search after the AI couldn't identify it
 pending_capture = None
 auto_capture_counter = 1
-processing_queue_count = 0  # Track number of cards being processed by AI
+processing_queue_count = 0  # Captures being identified (shown on the scanner page)
+queue_count_lock = threading.Lock()
 
-# AI Processing Queue (for async Fast Scan Mode)
-ai_processing_queue = queue.Queue()
-ai_worker_thread = None
-ai_worker_running = False
+
+def queue_changed(change):
+    """A capture went to be identified (+1) or is done (-1): tell the pages how many are being read"""
+    global processing_queue_count
+    with queue_count_lock:
+        processing_queue_count = max(0, processing_queue_count + change)
+        count = processing_queue_count
+    socketio.emit('processing_queue_update', {'queue_count': count}, namespace='/')
 
 
 def log_to_client(message, level="info"):
@@ -272,11 +282,7 @@ def log_to_client(message, level="info"):
 
 def get_ai_model_info():
     """Get current AI model info as a string for logging"""
-    if scanner and hasattr(scanner, 'card_identifier') and scanner.card_identifier:
-        provider = getattr(scanner.card_identifier, 'provider', 'unknown')
-        model = getattr(scanner.card_identifier, 'model', 'unknown')
-        return f"{provider}/{model}"
-    return None
+    return identification.ai_info() if identification else None
 
 
 def log_scanned_card(card_name, collector_number, ai_model, db_found, added_to_inventory, processing_time=None):
@@ -302,47 +308,64 @@ def set_pending_capture(image_path):
     pending_capture = str(image_path) if image_path else None
 
 
-def queue_for_review(game, image_path, name='', number='', set_code='', foil='unknown', card=None, why=None):
-    """A capture that wasn't added automatically goes to the review queue; scanning goes on"""
-    review.add(game.id, image_path, name, number, set_code, foil, card)
+def queue_for_review(game, image_path, name='', number='', set_code='', foil='unknown', card=None, why=None,
+                     station=None):
+    """
+    A capture that wasn't added automatically goes to the review queue; scanning goes on.
+    station: the stations.py station it came from (None: the scanner page's camera).
+    Returns why it was queued.
+    """
+    review.add(game.id, image_path, name, number, set_code, foil, card, station=station['id'] if station else None)
     if card:
-        what = f"{card['name']} ({why or 'printing not confirmed'})"
+        why = why or 'printing not confirmed'
+        what = f"{card['name']} ({why})"
     else:
+        why = 'not found' if name else 'not read'
         what = f"'{name}' (not found)" if name else "a card the AI couldn't read"
-    log_to_client(f"Queued for review: {what}", level="warning")
+    log_to_client(f"{station_prefix(station)}Queued for review: {what}", level="warning")
     # queued: a card was just added to the queue (the page plays the queue alert)
     socketio.emit('review_queue_update', {'count': review.count(game.id), 'queued': True}, namespace='/')
     # Nothing waits on the page for this card (normal mode blocks auto-capture until Add / Skip)
-    if scanner:
+    if scanner and station is None:
         scanner.card_under_review = False
+    return why
+
+
+def station_prefix(station):
+    """Start of a log line about a station's card"""
+    return f"[{station['name']}] " if station else ''
 
 
 def route_identified(image_path, card_name, collector_number, set_code, processing_time=None, foil='unknown',
-                     fast=False, reader=None, game_id=None):
+                     fast=False, reader=None, game_id=None, station=None, captured_at=None):
     """
     After the AI (or OCR - reader says which read the card): look the card up and add it automatically, show it, or queue it for review.
     While a review is open, a card captured meanwhile (manual capture, auto scanning without
     automatic adds) waits in the queue instead of taking the reviewed card's place and capture.
     game_id: the game being scanned when the card was captured.
+    station, captured_at: for a capture sent by a station (always fast: added or queued).
+    Returns what became of it: {'status': 'added' (+ 'card') | 'review' (+ 'reason') | 'shown'}
     """
     if game_id and game_id != games.active_id():
         # The game was switched while this capture waited for (or was with) the AI: it is not
         # looked up as a card of the other game - it waits in its own game's review queue,
         # without what was read (the prompt and parser may have been the other game's)
-        review.add(game_id, image_path, foil=foil)
-        log_to_client(f"Captured before the game was switched: kept in the {games.get(game_id).label} review queue",
-                      level="warning")
-        if scanner:
+        review.add(game_id, image_path, foil=foil, station=station['id'] if station else None)
+        log_to_client(f"{station_prefix(station)}Captured before the game was switched: kept in the "
+                      f"{games.get(game_id).label} review queue", level="warning")
+        if scanner and station is None:
             scanner.card_under_review = False
-        return
+        return {'status': 'review', 'reason': 'game switched'}
     reviewing = current_review_id is not None
     if not fast and not reviewing:
         set_pending_capture(image_path)
     if card_name and card_name.strip():
-        search_and_emit_card(card_name, collector_number, processing_time, was_fast_scan_mode=fast,
-                             set_code=set_code, image_path=image_path, foil=foil, reader=reader)
-    elif fast or reviewing:
-        queue_for_review(games.active(), image_path, foil=foil)
+        return search_and_emit_card(card_name, collector_number, processing_time, was_fast_scan_mode=fast,
+                                    set_code=set_code, image_path=image_path, foil=foil, reader=reader,
+                                    station=station, captured_at=captured_at)
+    if fast or reviewing:
+        return {'status': 'review', 'reason': queue_for_review(games.active(), image_path, foil=foil, station=station)}
+    return {'status': 'shown'}
 
 
 def added_payload(game, card, finish, quantity):
@@ -356,22 +379,28 @@ def scan_location():
     return (scanner.settings.get('scan_location', '') if scanner else '') or ''
 
 
-def add_automatically(game, card, image_path, foil):
+def add_automatically(game, card, image_path, foil, station=None, captured_at=None):
     """
     A confirmed card goes straight into the inventory: one Near Mint copy in the likely finish.
     Done here rather than by the page, so it doesn't depend on a page being open (or running
-    the current script - an old tab once sent every add without its card)
+    the current script - an old tab once sent every add without its card).
+    station: where it was captured, when not at the scanner page's camera - its location is
+    used if it has one. Returns what was added (added_payload).
     """
     finish = game.suggested_finish(card, foil)
+    location = (station or {}).get('location')
     row_id = scan_inventory.add_card(game.inventory_fields(card, finish), game.id, finish, 'Near Mint', 1,
-                                     capture=image_path, location=scan_location())
-    socketio.emit('inventory_updated', {'auto': True, 'stats': scan_inventory.get_stats(game.id),
-                                        'added': added_payload(game, card, finish, 1)}, namespace='/')
+                                     capture=image_path, location=scan_location() if location is None else location,
+                                     when=captured_at)
+    added = added_payload(game, card, finish, 1)
+    socketio.emit('inventory_updated', {'auto': True, 'stats': scan_inventory.get_stats(game.id), 'added': added,
+                                        'station': station['name'] if station else None}, namespace='/')
     start_price_update(game, card, [row_id])
+    return added
 
 
 def search_and_emit_card(card_name, collector_number, processing_time=None, was_fast_scan_mode=False, set_code=None,
-                         image_path=None, foil='unknown', reader=None):
+                         image_path=None, foil='unknown', reader=None, station=None, captured_at=None):
     """
     Search for card in database and emit results to client
 
@@ -382,17 +411,18 @@ def search_and_emit_card(card_name, collector_number, processing_time=None, was_
         processing_time: AI processing time in seconds
         was_fast_scan_mode: Whether this was a fast scan auto-add
         reader: what read the card when it wasn't the vision AI ("light-ocr")
+        station, captured_at: for a capture sent by a station (see route_identified)
 
     Returns:
-        tuple: (db_card_info, was_logged) - db result and whether it was logged
+        dict: what became of the card (see route_identified)
     """
     global current_card_info
 
     # Log search action
     if collector_number:
-        log_to_client(f"Auto-searching database for: {card_name} #{collector_number}")
+        log_to_client(f"{station_prefix(station)}Auto-searching database for: {card_name} #{collector_number}")
     else:
-        log_to_client(f"Auto-searching database for: {card_name}")
+        log_to_client(f"{station_prefix(station)}Auto-searching database for: {card_name}")
 
     # Search database
     game = games.active()
@@ -416,12 +446,13 @@ def search_and_emit_card(card_name, collector_number, processing_time=None, was_
     )
 
     if not auto_add and (was_fast_scan_mode or current_review_id is not None):
-        queue_for_review(game, image_path, card_name, collector_number, set_code, foil, db_card_info,
-                         why=None if was_fast_scan_mode else 'captured during a review')
-    elif auto_add:
+        why = queue_for_review(game, image_path, card_name, collector_number, set_code, foil, db_card_info,
+                               why=None if was_fast_scan_mode else 'captured during a review', station=station)
+        return {'status': 'review', 'reason': why}
+    if auto_add:
         # Added here, not through the current card: an open review keeps its card
-        add_automatically(game, db_card_info, image_path, foil)
-    elif db_card_info:
+        return {'status': 'added', 'card': add_automatically(game, db_card_info, image_path, foil, station, captured_at)}
+    if db_card_info:
         # Waiting for Add / Skip anyway: show the current prices
         db_card_info = game.with_prices(db_card_info)
         if image_path:
@@ -439,97 +470,40 @@ def search_and_emit_card(card_name, collector_number, processing_time=None, was_
         else:
             socketio.emit('card_not_found', {'card_name': card_name}, namespace='/')
 
-    return db_card_info, True
+    return {'status': 'shown'}
 
-
-def ai_processing_worker():
+def announce_and_route(image_path, card_info, card_number, game_id, processing_time=None, fast=False, to=None,
+                       station=None, captured_at=None):
     """
-    Background worker thread that processes cards from the AI queue.
-    This allows Fast Scan Mode to capture cards rapidly while AI processes them asynchronously.
+    What identification read from a capture (card_info; None: nothing): tell the page(s) and
+    look the card up, add it or queue it for review (route_identified).
+    processing_time: seconds the capture took when the reader gave none; to: only this page;
+    station, captured_at: for a capture sent by a station. Returns route_identified's outcome
+    with what was read ('read': name, number, set code, foil, reader).
     """
-    global ai_worker_running, processing_queue_count, current_card_info, scanner
-
-    logger.info("AI processing worker thread started")
-
-    while ai_worker_running:
-        try:
-            # Get item from queue (blocks with timeout)
-            try:
-                item = ai_processing_queue.get(timeout=1.0)
-            except queue.Empty:
-                continue
-
-            # Unpack queue item
-            card_number = item['card_number']
-            card_image_rgb = item['card_image']
-            image_path = item['image_path']
-            was_fast_scan_mode = item['fast_scan_mode']
-
-            logger.info(f"AI worker processing card #{card_number} (queue size: {ai_processing_queue.qsize()})")
-
-            # Run AI identification (this is the slow part - 13-36 seconds) - not for a
-            # capture of the game scanned before a switch (see route_identified)
-            start_time = time.time()
-            card_info = None
-            if item['game'] == games.active_id():
-                card_info = scanner.identify_card_from_image(card_image_rgb, item['foil_image'])
-            processing_time = time.time() - start_time
-
-            # Extract card info
-            card_name = ""
-            collector_number = ""
-            set_code = ""
-            foil_status = 'unknown'
-            if card_info and isinstance(card_info, dict):
-                card_name = card_info.get('name', '')
-                collector_number = card_info.get('collector_number', '')
-                set_code = card_info.get('set_code', '')
-                foil_status = card_info.get('foil', 'unknown')
-                if card_info.get('processing_time') is None:
-                    card_info['processing_time'] = processing_time
-
-            # Emit card captured event
-            socketio.emit('card_captured', {
-                'image_path': str(image_path),
-                'card_name': card_name,
-                'collector_number': collector_number,
-                'set_code': set_code,
-                'card_number': card_number,
-                'processing_time': processing_time,
-                'foil': foil_status
-            }, namespace='/')
-
-            route_identified(image_path, card_name, collector_number, set_code, processing_time, foil_status,
-                             fast=was_fast_scan_mode, reader=(card_info or {}).get('reader'), game_id=item['game'])
-
-            # In Fast Scan Mode, scanner is already ready for next capture
-            # In Normal Mode, card awaits user review
-            if was_fast_scan_mode:
-                logger.info(f"Fast Scan Mode: Card #{card_number} AI processing completed in {processing_time:.1f}s")
-            else:
-                logger.info(f"Normal Auto-Scan: Card #{card_number} awaiting review - next capture blocked until user adds/dismisses")
-
-            # Decrement queue counter
-            processing_queue_count -= 1
-            socketio.emit('processing_queue_update', {
-                'queue_count': processing_queue_count
-            }, namespace='/')
-
-            # Mark task as done
-            ai_processing_queue.task_done()
-
-        except Exception as e:
-            logger.exception(f"Error in AI processing worker: {e}")
-            log_to_client(f"AI processing error: {e}", level="error")
-            processing_queue_count = max(0, processing_queue_count - 1)
-            ai_processing_queue.task_done()
-
-    logger.info("AI processing worker thread stopped")
+    info = card_info if isinstance(card_info, dict) else {}
+    processing_time = info.get('processing_time') or processing_time
+    socketio.emit('card_captured', {
+        'image_path': str(image_path),
+        'card_name': info.get('name', ''),
+        'collector_number': info.get('collector_number', ''),
+        'set_code': info.get('set_code', ''),
+        'card_number': card_number,
+        'processing_time': processing_time,
+        'foil': info.get('foil', 'unknown')
+    }, namespace='/', to=to)
+    outcome = route_identified(image_path, info.get('name', ''), info.get('collector_number', ''),
+                               info.get('set_code', ''), processing_time, info.get('foil', 'unknown'), fast=fast,
+                               reader=info.get('reader'), game_id=game_id, station=station, captured_at=captured_at)
+    outcome['read'] = {'name': info.get('name', ''), 'number': info.get('collector_number', ''),
+                       'set': info.get('set_code', ''), 'foil': info.get('foil', 'unknown'),
+                       'reader': info.get('reader') or get_ai_model_info()} if info else None
+    return outcome
 
 
 def initialize_components():
     """Initialize all components"""
-    global scanner, database, inventory, scan_inventory, review, deck_store, recommend
+    global scanner, identification, stations, database, inventory, scan_inventory, review, deck_store, recommend
 
     logger.info("Initializing components...")
 
@@ -549,6 +523,10 @@ def initialize_components():
     # Card games (Magic, ...) - each wraps its card data; the saved one is scanned
     games.init(database, scanner.settings, log_callback=log_to_client)
 
+    # OCR and the vision AI, with a queue in front of each (shared by every camera)
+    identification = Identification(scanner.settings, log_callback=log_to_client)
+    identification.start()
+
     # Note: get_ai_model_info() and log_scanned_card() are defined at module level
     # so they can be accessed by both Flask routes and the AI worker thread
 
@@ -559,6 +537,7 @@ def initialize_components():
     scan_inventory = InventoryManager(db_file=SCAN_INVENTORY_FILE, log_callback=log_to_client)
     inventory.finish_interrupted_moves(scan_inventory)  # an "Add to collection" cut short by a crash
     review = ReviewQueue()
+    stations = Stations()
     deck_store = DeckManager()
     recommend = Recommendations()
 
@@ -577,7 +556,7 @@ def initialize_components():
     # Set up auto-capture callback
     def handle_auto_capture():
         """Handle auto-capture event - triggers card identification"""
-        global auto_capture_counter, current_card_info, processing_queue_count
+        global auto_capture_counter
         logger.info(f"Auto-capture triggered #{auto_capture_counter}")
 
         def announce_capture(taken=True):
@@ -600,111 +579,45 @@ def initialize_components():
         current_capture_number = auto_capture_counter
         auto_capture_counter += 1
 
-        # Execute capture logic directly
+        queue_changed(+1)
+        queued = False  # handed to the identification queues, which count it off when done
         try:
             # Capture fast scan mode state at time of capture (not current state)
             was_fast_scan_mode = scanner.fast_scan_mode if scanner and hasattr(scanner, 'fast_scan_mode') else False
 
-            # Increment queue counter (AI processing starting)
-            processing_queue_count += 1
-            socketio.emit('processing_queue_update', {
-                'queue_count': processing_queue_count
-            }, namespace='/')
-
-            is_detected = scanner.is_card_detected()
-            if not is_detected:
+            if not scanner.is_card_detected():
                 logger.warning("Auto-capture triggered but no card detected")
                 scanner.capture_pending = False
-                processing_queue_count -= 1
-                socketio.emit('processing_queue_update', {
-                    'queue_count': processing_queue_count
-                }, namespace='/')
                 return
 
-            # ========================================================================
-            # FAST SCAN MODE: Async capture + queue AI processing for rapid scanning
-            # ========================================================================
+            game_id = games.active_id()  # a switch before the card is read: see route_identified
+            image_path, card_image_rgb, foil_image = scanner.capture_card_image_only(current_capture_number, settle=0)
+            announce_capture(taken=bool(image_path))
+            if not image_path:
+                logger.error("Auto-capture: failed to capture image")
+                return
+
             if was_fast_scan_mode:
-                # Capture image ONLY (no AI processing) - fast!
-                image_path, card_image_rgb, foil_image = scanner.capture_card_image_only(current_capture_number, settle=0)
-                announce_capture(taken=bool(image_path))
+                # Adding automatically: the card is read in the background (OCR, then the AI
+                # for what OCR can't settle) and the scanner is ready for the next drop
+                def identified(card_info, seconds):
+                    try:
+                        announce_and_route(image_path, card_info, current_capture_number, game_id, seconds, fast=True)
+                        logger.info(f"Fast Scan Mode: Card #{current_capture_number} done in {seconds:.1f}s")
+                    finally:
+                        queue_changed(-1)
 
-                if not image_path:
-                    logger.error("Fast Scan: Failed to capture image")
-                    processing_queue_count -= 1
-                    socketio.emit('processing_queue_update', {
-                        'queue_count': processing_queue_count
-                    }, namespace='/')
-                    return
-
-                # Queue the image for AI processing in background worker
-                ai_processing_queue.put({
-                    'card_number': current_capture_number,
-                    'card_image': card_image_rgb,
-                    'image_path': image_path,
-                    'foil_image': foil_image,
-                    'fast_scan_mode': True,
-                    'game': games.active_id(),  # a switch before the AI gets to it: see route_identified
-                })
-
-                # Immediately clear the review flag to allow next capture after cooldown
+                identification.submit(card_image_rgb, foil_image, game_id, identified)
+                queued = True
                 scanner.card_under_review = False
-
-                logger.info(f"Fast Scan Mode: Card #{current_capture_number} captured and queued for AI (queue: {ai_processing_queue.qsize()}) - ready for next capture in {Config.AUTO_CAPTURE_DELAY}s")
-
-            # ========================================================================
-            # NORMAL MODE: Synchronous capture + AI (original behavior)
-            # ========================================================================
+                logger.info(f"Fast Scan Mode: Card #{current_capture_number} captured and queued "
+                            f"(waiting for OCR / AI: {identification.waiting()}) - ready for next capture in {Config.AUTO_CAPTURE_DELAY}s")
             else:
-                # Synchronous capture with AI processing (blocks until AI completes)
-                game_id = games.active_id()
-                image_path, card_image_rgb, foil_image = scanner.capture_card_image_only(current_capture_number, settle=0)
-                announce_capture(taken=bool(image_path))
-                vision_ai_result = scanner.identify_card_from_image(card_image_rgb, foil_image) if image_path else None
-
-                if not image_path:
-                    logger.error("Normal Mode: Failed to capture image")
-                    processing_queue_count -= 1
-                    socketio.emit('processing_queue_update', {
-                        'queue_count': processing_queue_count
-                    }, namespace='/')
-                    return
-
-                # Extract card name from vision AI result
-                card_name = ""
-                collector_number = ""
-                set_code = ""
-                processing_time = None
-                foil_status = 'unknown'
-                if vision_ai_result and isinstance(vision_ai_result, dict):
-                    card_name = vision_ai_result.get('name', '')
-                    collector_number = vision_ai_result.get('collector_number', '')
-                    set_code = vision_ai_result.get('set_code', '')
-                    processing_time = vision_ai_result.get('processing_time')
-                    foil_status = vision_ai_result.get('foil', 'unknown')
-
-                # Emit card captured event
-                socketio.emit('card_captured', {
-                    'image_path': str(image_path),
-                    'card_name': card_name,
-                    'collector_number': collector_number,
-                    'set_code': set_code,
-                    'card_number': current_capture_number,
-                    'processing_time': processing_time,
-                    'foil': foil_status
-                }, namespace='/')
-
-                route_identified(image_path, card_name, collector_number, set_code, processing_time, foil_status,
-                                 reader=(vision_ai_result or {}).get('reader'), game_id=game_id)
-
-                # Normal mode: card awaits user review (card_under_review stays True)
+                # Each card waits for Add / Skip: read here, the next capture is held back
+                # (card_under_review stays True)
+                card_info = identification.identify(card_image_rgb, foil_image)
+                announce_and_route(image_path, card_info, current_capture_number, game_id)
                 logger.info(f"Normal Auto-Scan: Card #{current_capture_number} awaiting review - next capture blocked until user adds/dismisses")
-
-                # Decrement queue counter (AI processing completed synchronously)
-                processing_queue_count -= 1
-                socketio.emit('processing_queue_update', {
-                    'queue_count': processing_queue_count
-                }, namespace='/')
 
         except Exception as e:
             logger.exception(f"Error in auto-capture: {e}")
@@ -713,21 +626,12 @@ def initialize_components():
             if scanner:
                 scanner.card_under_review = False
                 scanner.capture_pending = False
-            # Decrement queue counter on error too
-            processing_queue_count -= 1
-            socketio.emit('processing_queue_update', {
-                'queue_count': processing_queue_count
-            }, namespace='/')
+        finally:
+            if not queued:
+                queue_changed(-1)
 
     scanner.auto_capture_callback = handle_auto_capture
     logger.info("Auto-capture callback registered")
-
-    # Start AI processing worker thread
-    global ai_worker_thread, ai_worker_running
-    ai_worker_running = True
-    ai_worker_thread = threading.Thread(target=ai_processing_worker, daemon=True, name="AI-Worker")
-    ai_worker_thread.start()
-    logger.info("AI processing worker thread started")
 
     logger.info("All components initialized successfully!")
     log_to_client("All components initialized successfully", level="success")
@@ -1739,6 +1643,100 @@ def deck_ideas_state(kind):
 
 
 
+# ============================================================================
+# Stations: cameras elsewhere that capture cards and send them here (stations.py)
+# ============================================================================
+
+STATION_CAPTURE_MAX_BYTES = 30 * 1024 * 1024  # a card image and its foil image
+STATION_CAPTURE_WAIT = 30  # seconds a station waits for its card's outcome unless it says otherwise
+
+
+def decode_upload(file):
+    """(bytes, RGB image) of an uploaded picture, or (None, None)"""
+    data = file.read() if file else b''
+    image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR) if data else None
+    if image is None:
+        return None, None
+    return data, cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+
+@app.route('/api/stations')
+def station_list():
+    return jsonify({'stations': stations.all(), 'token_required': bool(Config.STATION_TOKEN)})
+
+
+@app.route('/api/stations/<station_id>', methods=['PUT', 'DELETE'])
+def station_item(station_id):
+    """Rename a station, set the location its cards are put in, or forget it"""
+    if request.method == 'DELETE':
+        return (jsonify({'success': True}) if stations.remove(station_id)
+                else (jsonify({'success': False, 'message': 'No such station'}), 404))
+    data = request.get_json(silent=True) or {}
+    station = stations.update(station_id, name=data.get('name'), location=data.get('location'))
+    if station is None:
+        return jsonify({'success': False, 'message': 'No such station'}), 404
+    return jsonify({'success': True, 'station': station})
+
+
+@app.route('/api/stations/<station_id>/captures', methods=['POST'])
+def station_capture(station_id):
+    """
+    A card captured by a station. Multipart form:
+      image       the card as the station cut it out (JPEG / PNG)
+      foil_image  optional: the perspective-corrected card, for the star/dot foil check
+      name        optional: what the station calls itself
+      wait        optional: seconds to wait for the outcome (default 30; 0: answer at once)
+    The card is read (OCR, then the vision AI), and - as when adding automatically - added to
+    the scanned cards if its printing is confirmed, else queued for review.
+    Answers {'capture': n, 'status': 'added' | 'review' | 'pending', ...}; 202 while pending.
+    """
+    if not Stations.valid_id(station_id):
+        return jsonify({'success': False, 'message': 'Station ids are 1-40 letters, digits, - or _'}), 400
+    if Config.STATION_TOKEN and not hmac.compare_digest(request.headers.get('X-Station-Token', ''),
+                                                        Config.STATION_TOKEN):
+        return jsonify({'success': False, 'message': 'Wrong or missing station token'}), 401
+    if (request.content_length or 0) > STATION_CAPTURE_MAX_BYTES:
+        return jsonify({'success': False, 'message': 'Capture too large'}), 413
+    data, image = decode_upload(request.files.get('image'))
+    if image is None:
+        return jsonify({'success': False, 'message': "No readable picture in 'image'"}), 400
+    _, foil_image = decode_upload(request.files.get('foil_image'))
+    try:
+        wait = max(0.0, min(float(request.form.get('wait', STATION_CAPTURE_WAIT)), 120.0))
+    except ValueError:
+        wait = STATION_CAPTURE_WAIT
+
+    station = stations.capture(station_id, request.form.get('name'))
+    number = station['captures']
+    captured_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    image_path = Config.IMAGES_DIR / f"{station_id}_{number}_{int(time.time())}.jpg"
+    if data[:2] == b'\xff\xd8':
+        image_path.write_bytes(data)  # the station's JPEG as it is
+    else:
+        cv2.imwrite(str(image_path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+
+    game_id = games.active_id()
+    outcome, done = {}, threading.Event()
+
+    def identified(card_info, seconds):
+        try:
+            outcome.update(announce_and_route(image_path, card_info, number, game_id, seconds, fast=True,
+                                              station=station, captured_at=captured_at))
+            outcome['seconds'] = round(seconds, 2)
+        except Exception as e:
+            logger.exception(f"Station capture {image_path.name} failed: {e}")
+            outcome.update(status='error', message=str(e))
+        finally:
+            queue_changed(-1)
+            done.set()
+
+    queue_changed(+1)
+    identification.submit(image, foil_image, game_id, identified)
+    if not done.wait(wait):
+        return jsonify({'success': True, 'capture': number, 'status': 'pending'}), 202
+    return jsonify({'success': outcome.get('status') != 'error', 'capture': number, **outcome})
+
+
 @app.route('/api/detection_status')
 def get_detection_status():
     """Get current card detection status with detailed state information"""
@@ -1762,10 +1760,10 @@ def get_ai_provider():
     """Get current AI provider and model for card identification"""
     global scanner
 
-    if scanner and scanner.card_identifier:
+    if identification and identification.card_identifier:
         return jsonify({
-            'provider': scanner.card_identifier.provider,
-            'model': scanner.card_identifier.model,
+            'provider': identification.card_identifier.provider,
+            'model': identification.card_identifier.model,
             'enabled': True
         })
 
@@ -1898,38 +1896,14 @@ def handle_capture(data):
         # Manual capture works regardless of detection state
         # If no card detected, captures full frame
         game_id = games.active_id()
-        image_path, vision_ai_result = scanner.capture_card_image(card_number)
+        image_path, card_image_rgb, foil_image = scanner.capture_card_image_only(card_number)
 
         if not image_path:
             emit('error', {'message': 'Failed to capture image'})
             return
 
-        # Extract card name from vision AI result (if identified)
-        card_name = ""
-        collector_number = ""
-        set_code = ""
-        processing_time = None
-        foil_status = 'unknown'
-        if vision_ai_result and isinstance(vision_ai_result, dict):
-            card_name = vision_ai_result.get('name', '')
-            collector_number = vision_ai_result.get('collector_number', '')
-            set_code = vision_ai_result.get('set_code', '')
-            processing_time = vision_ai_result.get('processing_time')
-            foil_status = vision_ai_result.get('foil', 'unknown')
-
-        result = {
-            'image_path': str(image_path),
-            'card_name': card_name,
-            'collector_number': collector_number,
-            'set_code': set_code,
-            'card_number': card_number,
-            'processing_time': processing_time,
-            'foil': foil_status
-        }
-        emit('card_captured', result)
-
-        route_identified(image_path, card_name, collector_number, set_code, processing_time, foil_status,
-                         reader=(vision_ai_result or {}).get('reader'), game_id=game_id)
+        card_info = identification.identify(card_image_rgb, foil_image)
+        announce_and_route(image_path, card_info, card_number, game_id, to=request.sid)
 
     except Exception as e:
         logger.exception(f"Exception in handle_capture: {e}")
@@ -2284,8 +2258,8 @@ def handle_toggle_auto_capture(data):
     scanner.auto_capture_enabled = enabled
 
     # Load a local AI model now, so the first auto-captured card doesn't wait for it
-    if enabled and scanner.card_identifier:
-        scanner.card_identifier.warm_up()
+    if enabled and identification.card_identifier:
+        identification.card_identifier.warm_up()
 
     # When disabling, also clear the card_under_review flag to reset state
     if not enabled:
@@ -2319,7 +2293,7 @@ def get_scan_settings():
     """Scanning preferences the page needs on load"""
     return jsonify({
         'auto_add': bool(scanner.fast_scan_mode) if scanner else True,
-        'ocr_first': bool(scanner.ocr_enabled) if scanner else True,
+        'ocr_first': bool(identification.ocr_enabled) if identification else True,
         'ocr_installed': CardOcr.installed(),
         'debug_trace': bool(scanner.debug_trace_enabled) if scanner else False,
         'debug_mode': saved_debug_mode(),
@@ -2389,8 +2363,8 @@ def handle_toggle_ocr(data):
     if not scanner:
         emit('error', {'message': 'Scanner not initialized'})
         return
-    scanner.set_ocr_enabled(bool(data.get('enabled', False)))
-    emit('ocr_toggled', {'enabled': scanner.ocr_enabled, 'installed': CardOcr.installed()})
+    identification.set_ocr_enabled(bool(data.get('enabled', False)))
+    emit('ocr_toggled', {'enabled': identification.ocr_enabled, 'installed': CardOcr.installed()})
 
 
 @socketio.on('toggle_debug_trace')
@@ -2543,8 +2517,7 @@ def handle_set_ai_provider(data):
     else:
         logger.info(f"AI provider change requested: {provider}")
 
-    # Call the scanner's set_ai_provider method
-    result = scanner.set_ai_provider(provider, model)
+    result = identification.set_ai_provider(provider, model)
 
     if result['success']:
         emit('ai_provider_set', {
@@ -2573,8 +2546,8 @@ def handle_save_ai_credential(data):
 
 def active_ai():
     """(provider, model) the scanner identifies cards with - model is None without an identifier"""
-    if scanner and scanner.card_identifier:
-        return scanner.card_identifier.provider, scanner.card_identifier.model
+    if identification and identification.card_identifier:
+        return identification.card_identifier.provider, identification.card_identifier.model
     return Config.VISION_AI_PROVIDER, None
 
 
@@ -2637,22 +2610,22 @@ def handle_test_prompt(data):
     def reply(**result):
         socketio.emit('prompt_test_result', {'kind': kind, **result}, to=sid)
 
-    if not scanner or not scanner.card_identifier:
+    if not identification or not identification.card_identifier:
         reply(error='Vision AI is not configured')
         return
-    if not scanner.last_capture:
+    if not identification.last_capture:
         reply(error='No card captured yet - capture a card first')
         return
     if not text:
         reply(error='The prompt is empty')
         return
-    image, foil_image = scanner.last_capture
+    image, foil_image = identification.last_capture
     if kind == 'foil' and foil_image is None:
         reply(error='The last capture has no detected card outline, so the foil corner cannot be located')
         return
 
     def run():
-        identifier = scanner.card_identifier
+        identifier = identification.card_identifier
         start = time.time()
         try:
             if kind == 'foil':
@@ -2873,8 +2846,8 @@ def main():
     print(f"✓ {game.label}: {game.card_count():,} cards")
 
     # Check Vision AI status
-    if scanner.card_identifier:
-        ai = f"{scanner.card_identifier.provider} / {scanner.card_identifier.model}"
+    if identification.card_identifier:
+        ai = f"{identification.card_identifier.provider} / {identification.card_identifier.model}"
         logger.info(f"Vision AI enabled using {ai}")
         print(f"✓ Vision AI enabled ({ai})")
     else:
@@ -2931,6 +2904,8 @@ def main():
         print("\n\nShutting down...")
         logger.info("Shutdown requested by user")
     finally:
+        if identification:
+            identification.stop()
         if scanner:
             scanner.cleanup()
         if database:
