@@ -64,7 +64,7 @@ Collection page with your cards in it unless you mean to show them.
 | 9 | 4:20-5:10 | **Scanning.** Split screen: the box from above, and the page. Click **Start auto scanning**. Drop 8-10 cards, one per beep. The card panel shows each name; *Scanned* climbs. Include the foil (it says Foil) and the full-art card (a moment longer, or the *Review* counter lights up). Optional: a second camera or the phone scanning at the same time, each with its own page. | "Start auto scanning, and drop the cards. Wait for the beep - that's the picture taken - then drop the next one. Each card is matched to its exact printing by its set code and collector number. This one is a foil: it reads the little star next to the set code. And this one has no text box to read, so it took the AI a second longer." | **Start auto scanning** |
 | 10 | 5:10-5:35 | **Review.** Click the *Review* counter: the photo next to the suggested card. Click **Add**. | "Anything the scanner isn't sure about waits here, with its photo, and scanning carries on. You check it at the end: add it, correct it, or skip it." | **Review** → **Add** |
 | 11 | 5:35-6:00 | **Collection.** Click *Scanned* → **Add to collection**; then the Collection page: the list, switch to the image grid, a glimpse of a deck and the statistics. | "When the pile is done, one click moves it into your collection - where you can sort cards into boxes and binders, build decks, see what a deck is still missing, and export to Moxfield." | **Scanned** → **Add to collection** → *Collection* |
-| 12 | 6:00-6:15 | **Close.** The diagram again, now with a second camera and a phone added. The repository address on screen. | "That's one server and one camera. Add more cameras the same way, or use a phone. The step-by-step guide and everything else is in the repository." | - |
+| 12 | 6:00-6:20 | **Close.** The diagram again, now with a second camera and a phone added. The repository address on screen, and the caption *Built with AI: code and documentation written by Claude, directed by the author*. | "That's one server and one camera. Add more cameras the same way, or use a phone. One more thing: this whole project - the code and the guide you just followed - was written by an AI assistant. I told it what I wanted and tested it with real cards. The step-by-step guide and everything else is in the repository." | - |
 
 ## Lines for the things that go wrong on camera
 
@@ -88,6 +88,10 @@ Keep one or two in if they happen - they make the video more useful.
 | 0:55-1:00 | The Collection grid; the repository address | "Then it's in your collection. Guide in the description." |
 
 ## Notes for whoever records it
+
+- **Say that it was built with AI** (scene 12, and the caption): the project, this script
+  included, was written by an AI coding assistant (Claude) directed by its author. Put the same
+  line in the video's description.
 
 - The numbers said out loud were measured on this project's own setup: about 1.7 s per card
   over a pile, 0.1 s to read a card as text on a GPU (0.7 s without one), about 1 s for the

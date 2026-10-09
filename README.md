@@ -4,6 +4,10 @@ A camera-based scanner for Magic: The Gathering cards. Drop cards onto a pile un
 each one is found in the picture, captured once, identified down to the exact printing and
 finish, and added to a collection you can filter, build decks from and export to Moxfield.
 
+> **Built with AI.** All of this project - the code, the tests and this documentation - was
+> written by an AI coding assistant (Claude, through Claude Code), directed by the project's
+> author. See [How this project was built](#how-this-project-was-built).
+
 It is made of two kinds of programs on your network:
 
 - **Camera stations** - any number of them. A small computer with a USB webcam (a PC, a laptop,
@@ -439,6 +443,30 @@ station holds a Socket.IO connection of its own (`/station`); both are listed in
 PROGRAM_DOCUMENTATION.md.
 
 The web interface has no login: run it on a network you trust.
+
+## How this project was built
+
+This project was developed entirely with AI. The code, the tests and the documentation - this
+README, the installation guides, the technical documentation - were written by an AI coding
+assistant: Claude, by Anthropic, working through Claude Code. The commit history records it
+(nearly every commit carries a `Co-Authored-By: Claude` line). The same goes for the
+[Android app](https://github.com/filipesibinel/mtg-scanner-android).
+
+The project's author did what the AI could not: decided what to build and how it should
+behave, ran it on real hardware - webcams, a Raspberry Pi, a phone - with real cards, and
+reported what happened. The thresholds and timings quoted in the documentation come from
+those runs and from recorded sessions, and each says when and on what it was measured.
+
+What that means if you use it:
+
+- **It has been run, not audited.** The author uses it for their own collection, but no one
+  has reviewed the code independently, and the automated tests cover one area (which camera
+  scanned what, and backups). Where something was never tried, the documentation says so
+  ("not tested").
+- **It is made for a home network.** There is no login; see the note under
+  [HTTP API](#http-api).
+- **Keep backups** of a collection you care about - the server makes one a day, and
+  *Back up now* is on the collection page.
 
 ## License
 

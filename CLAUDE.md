@@ -27,6 +27,10 @@ The single-machine scanner this grew from is a separate project
 ([filipesibinel/scanner](https://github.com/filipesibinel/scanner), `../scanner`): never push
 to it or change it from here (the remote `desktop` is fetch-only on purpose).
 
+The project is developed entirely with AI (this assistant, directed by the user), and the
+documentation says so (README.md, *How this project was built*): keep that statement true and
+in place, and keep marking in the docs what was measured and what was never tested.
+
 **How everything works is documented in [PROGRAM_DOCUMENTATION.md](PROGRAM_DOCUMENTATION.md)**
 (stations, detection, auto-capture rules, matching, foil logic, schema, events, measured
 thresholds) - read the relevant section before changing behavior, and keep it up to date.

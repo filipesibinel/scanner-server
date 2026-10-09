@@ -3,6 +3,11 @@
 How the scanner works inside. For what it is and how to use it see [README.md](README.md); for
 installing the server, the camera stations and the phone app see [INSTALL.md](INSTALL.md).
 
+The program and this document were written by an AI coding assistant (Claude, through Claude
+Code), directed by the project's author, who ran it on real hardware with real cards. The
+numbers below - thresholds, timings, counts - come from those runs and from recorded sessions;
+each says when it was measured, and "not tested" marks what never was.
+
 ## Contents
 
 1. [Overview](#overview)

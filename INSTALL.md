@@ -11,6 +11,10 @@ The scanner has three parts. Install the server once, then as many cameras as yo
 There is also a way to run [everything on one machine](#everything-on-one-machine-without-docker)
 without Docker, as the scanner this project grew from.
 
+Like the rest of the project, these instructions were written by an AI coding assistant
+directed by the author ([README](README.md#how-this-project-was-built)). Where a step was
+measured or was never tried, it says so.
+
 ## 1. The server
 
 The server (web pages, card data, OCR reader, AI requests, your collection) runs as a container
