@@ -34,8 +34,10 @@ const byText = (a, b) => (a || '').localeCompare(b || '', undefined, {numeric: t
 const INVENTORY_SORTS = {
     newest: null,
     oldest: (a, b) => byText(a.timestamp, b.timestamp) || a.id - b.id,
-    // When the entry came into the collection (one time per "Add to collection")
-    added: (a, b) => byText(b.added_at, a.added_at) || b.id - a.id,
+    // When the entry came into the collection (one time per "Add to collection"); the cards of
+    // one such batch by when they were scanned - their ids run the other way (the card scanned
+    // last is moved first), which once put the first card scanned on top
+    added: (a, b) => byText(b.added_at, a.added_at) || byText(b.timestamp, a.timestamp) || b.id - a.id,
     name: (a, b) => byText(a.name, b.name),
     price_desc: (a, b) => (b.price || 0) - (a.price || 0),
     price_asc: (a, b) => (a.price || 0) - (b.price || 0),

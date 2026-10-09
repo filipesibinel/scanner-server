@@ -24,7 +24,7 @@
     </main>
 
     {% include '_dialogs.html' %}
-    <script src="{{ url_for('static', filename='js/common.js') }}?v=16"></script>
+    <script src="{{ url_for('static', filename='js/common.js') }}?v=17"></script>
     <script>
         // Each page defines these two (common.js / _topbar.html)
         function openSettings() { window.location.href = {{ settings_url|tojson }}; }
