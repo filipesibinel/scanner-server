@@ -98,7 +98,7 @@ docker compose up -d --build              # the first start downloads the card d
 # open http://<server>:5000 and choose the AI in Settings
 
 # a camera station, on the machine with the webcam (same repository)
-echo "SCANNER_SERVER=http://<server>:5000" > .env
+cp .env.station.example .env              # edit it: the server's address, the camera, a name
 docker compose -f docker-compose.client.yml up -d --build
 # it appears on the server's page by itself
 ```

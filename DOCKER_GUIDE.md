@@ -94,7 +94,7 @@ Web Interface Starting...
 **4. Find the server's address** - you need it for the browser and for the camera station.
 
 ```bash
-hostname -I        # the first address, e.g. 192.168.1.20
+ip route get 1.1.1.1 | grep -o 'src [0-9.]*'        # src 192.168.1.20
 ```
 
 **5. Open it.** In a browser on any device on your network: `http://192.168.1.20:5000` (with
@@ -128,16 +128,24 @@ usb-ACME_Webcam_HD_12345678-video-index1
 Take the one ending in **`-video-index0`**. This name stays the same when the camera is
 unplugged or the machine restarts, which `/dev/video0`, `/dev/video2`, ... do not.
 
-**3. Write the station's three settings** into a file named `.env` in this folder - the
-server's address from Part 1, your camera's name, and what to call this camera:
+**3. Give the station its three settings.** They live in a file named `.env` in this folder,
+which is yours alone: updates never touch it. Start from the example and edit it:
 
 ```bash
-cat > .env <<'END'
+cp .env.station.example .env
+nano .env                          # or any editor
+```
+
+Change the three lines to the server's address from Part 1, your camera's name, and what to
+call this camera:
+
+```
 SCANNER_SERVER=http://192.168.1.20:5000
 SCANNER_CAMERA_INDEX=/dev/v4l/by-id/usb-ACME_Webcam_HD_12345678-video-index0
 SCANNER_STATION_NAME=Desk camera
-END
 ```
+
+In nano, save with Ctrl+O, Enter, and leave with Ctrl+X.
 
 **4. Start it.**
 
@@ -163,8 +171,10 @@ cards - it can be switched off, moved or reinstalled at any time.
 
 ### Both on one machine
 
-Use the same `scanner-server` folder for both (skip the clone), and give the station the
-server's **container name** instead of the machine's address:
+Use the same `scanner-server` folder for both (skip the clone). Server and station then share
+one `.env`: if the server already has one (API keys, a port), **add** the station's lines to
+it instead of copying over it - `cat .env.station.example >> .env`, then edit. Give the station
+the server's **container name** instead of the machine's address:
 
 ```
 SCANNER_SERVER=http://server:5000

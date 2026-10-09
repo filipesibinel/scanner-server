@@ -102,11 +102,7 @@ scanner lock the focus; others keep their own autofocus.
 ```bash
 git clone https://github.com/filipesibinel/scanner-server.git && cd scanner-server
 ls /dev/v4l/by-id/                 # find your camera: ...-video-index0
-cat > .env <<'END'
-SCANNER_SERVER=http://<server>:5000
-SCANNER_CAMERA_INDEX=/dev/v4l/by-id/<your camera>-video-index0
-SCANNER_STATION_NAME=Desk camera
-END
+cp .env.station.example .env       # then edit it: the server's address, the camera, a name
 docker compose -f docker-compose.client.yml up -d --build
 docker compose -f docker-compose.client.yml logs -f
 ```
