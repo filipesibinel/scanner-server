@@ -1727,7 +1727,7 @@ function renderStations(stations, tokenRequired) {
                        aria-label="Station location" autocomplete="off" onchange="saveStation('${id}', {location: this.value})">
             </div>
             <div class="station-meta">
-                <span class="hint">${station.captures} card${station.captures === 1 ? '' : 's'} · last ${escapeHtml(station.last_seen || 'never')}</span>
+                <span class="hint">${station.scanned} scanned card${station.scanned === 1 ? '' : 's'} · ${station.captures} captured in all · last ${escapeHtml(station.last_seen || 'never')}</span>
                 <button class="btn btn-small" onclick="undoStationAdd('${id}')" title="Take back the last card this station added">Undo last</button>
                 <button class="btn btn-small btn-danger" onclick="forgetStation('${id}')" title="Remove it from this list, with its scanned cards and review cards">Forget</button>
             </div>

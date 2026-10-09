@@ -39,7 +39,7 @@
                 <a class="panel station-card" href="/scan/${encodeURIComponent(station.id)}">
                     <strong>${escapeHtml(station.name)}</strong>
                     <span class="station-state ${station.connected && !station.camera_error ? 'is-on' : ''}">${escapeHtml(state)}</span>
-                    <span class="hint">${station.captures} card${station.captures === 1 ? '' : 's'}${station.review ? ' · ' + station.review + ' to review' : ''}${station.location ? ' · into ' + escapeHtml(station.location) : ''}</span>
+                    <span class="hint">${station.scanned} scanned card${station.scanned === 1 ? '' : 's'}${station.review ? ' · ' + station.review + ' to review' : ''}${station.location ? ' · into ' + escapeHtml(station.location) : ''}</span>
                 </a>`;
             }).join('');
             document.getElementById('stations-hint').textContent = (stations.length ? '' : 'No camera yet. ')

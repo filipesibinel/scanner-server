@@ -324,7 +324,9 @@ OCR.
 Every station has its own scanner page, `/scan/<id>`: its live view and controls, the card it
 is showing, its review queue, its Undo, its activity log and its scanned-cards count. `/` lists
 the stations (`templates/stations.html`, refreshed from `GET /api/stations`) - or, when the
-server has a camera of its own, is that camera's scanner page.
+server has a camera of its own, is that camera's scanner page. A station's count there is
+`scanned`, its copies in the scanned cards now (what its page lists); `captures` in
+`data/stations.json` counts every picture it ever sent and only numbers the captures.
 
 On the server each station has a **desk** (`app.py: Desk`, `desk_for`): its scanner, the card
 on its page (`current_card_info`), its open review, the capture being reviewed, its captures

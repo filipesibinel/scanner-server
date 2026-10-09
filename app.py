@@ -1977,7 +1977,10 @@ def decode_upload(file):
 
 @app.route('/api/stations')
 def station_list():
-    """The stations, with whether each one's camera is connected and what it sees"""
+    """
+    The stations, with whether each one's camera is connected and what it sees. 'scanned' is
+    what a station has in the scanned cards now; 'captures' every picture it ever sent.
+    """
     listed = []
     for station in stations.all():
         connected = camera_hub.connected(station['id'])
@@ -1985,6 +1988,7 @@ def station_list():
         listed.append({**station, 'connected': connected, 'camera_error': status.get('camera_error'),
                        'detected': bool(status.get('detected')),
                        'scanning': bool(connected and camera_hub.scanner(station['id']).auto_capture_enabled),
+                       'scanned': scan_inventory.get_stats(games.active_id(), station['id'])['total_cards'],
                        'review': review.count(games.active_id(), station['id'])})
     return jsonify({'stations': listed, 'token_required': bool(Config.STATION_TOKEN)})
 
