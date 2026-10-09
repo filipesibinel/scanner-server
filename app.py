@@ -485,6 +485,17 @@ def added_payload(game, card, finish, quantity):
             'finish': game.finishes[finish], 'quantity': quantity}
 
 
+def scan_stats(game_id):
+    """The scanned cards' totals as the current desk's page shows them: a station's page counts what that station scanned"""
+    return scan_inventory.get_stats(game_id, desk().id)
+
+
+def scan_camera():
+    """The scanned cards' camera filter of a request (?camera= or JSON 'camera'): a station id, or None for every camera"""
+    camera = request.args.get('camera') or (request.get_json(silent=True) or {}).get('camera') or ''
+    return camera if stations and stations.get(camera) else None
+
+
 def scan_location():
     """Where cards being scanned are put (the inventory location new entries get; '' = none): each station has its own"""
     station = desk().station
@@ -506,7 +517,7 @@ def add_automatically(game, card, image_path, foil, station=None, captured_at=No
                                      capture=image_path, location=scan_location(), when=captured_at,
                                      source=desk().id)
     added = added_payload(game, card, finish, 1)
-    emit_desk('inventory_updated', {'auto': True, 'stats': scan_inventory.get_stats(game.id), 'added': added})
+    emit_desk('inventory_updated', {'auto': True, 'stats': scan_stats(game.id), 'added': added})
     start_price_update(game, card, [row_id])
     return added
 
@@ -921,7 +932,7 @@ def get_stats():
                          'updating': game.id in data_updates_running},
             'review': review.count(game.id, desk().review_filter) if review else 0,
             # The scanner page's counters: what was scanned and not moved to the collection yet
-            'inventory': scan_inventory.get_stats(game.id),
+            'inventory': scan_stats(game.id),
             'collection': inventory.get_stats(game.id)
         })
 
@@ -937,18 +948,20 @@ def inventory_area():
 def scan_to_collection():
     """
     Move every scanned card of the active game into the collection (merging with what is there);
-    JSON 'location': where they all go ('' = each keeps the location it was scanned into).
+    JSON 'location': where they all go ('' = each keeps the location it was scanned into);
+    'camera' (a station id; also ?camera=): only the cards that camera scanned.
     GET: what the page asks first - how many cards wait, the locations in use and the decks' names.
     """
     game = games.active()
+    camera = scan_camera()
     if request.method == 'GET':
         locations = set(inventory.locations(game.id)) | set(scan_inventory.locations(game.id))
-        return jsonify({'success': True, 'cards': scan_inventory.get_stats(game.id)['total_cards'],
+        return jsonify({'success': True, 'cards': scan_inventory.get_stats(game.id, camera)['total_cards'],
                         'locations': sorted(locations, key=str.lower),
                         # the page lists the locations named after a deck apart
                         'decks': [deck['name'] for deck in deck_store.list_decks(game.id)] if game.deck_formats else []})
     location = str((request.get_json(silent=True) or {}).get('location') or '').strip()[:60]
-    moved = inventory.take_from(scan_inventory, game.id, location=location)
+    moved = inventory.take_from(scan_inventory, game.id, location=location, station=camera)
     socketio.emit('inventory_updated', {'auto': False, 'stats': scan_inventory.get_stats(game.id)}, namespace='/')
     return jsonify({'success': True, **moved, 'stats': scan_inventory.get_stats(game.id)})
 
@@ -959,7 +972,16 @@ def get_inventory():
     if inventory:
         try:
             game = games.active()
-            cards = inventory_area().get_all_cards(game.id)
+            # The scanned cards can be narrowed to one camera's (?camera=)
+            camera = scan_camera() if inventory_area() is scan_inventory else None
+            cards = inventory_area().get_all_cards(game.id, camera)
+            if inventory_area() is scan_inventory and not camera:
+                # Who scanned each entry: {station name: copies}
+                names = {station['id']: station['name'] for station in stations.all()}
+                by_entry = scan_inventory.stations_by_entry(game.id)
+                for card in cards:
+                    card['cameras'] = {names.get(station, station): copies
+                                       for station, copies in by_entry.get(card['id'], {}).items()}
             # What the collection page shows and filters with beyond the stored columns
             details = game.card_details([card['card_id'] for card in cards])
             # The decks that use each card (not for the scanned cards)
@@ -2039,7 +2061,7 @@ def undo_station_add(station):
     if name:
         with in_desk(desk_for(station['id'])):
             log_to_client(f"{station_prefix(station)}Removed {name} from the scanned cards (undo)", level="warning")
-            emit_desk('inventory_updated', {'auto': True, 'stats': scan_inventory.get_stats(games.active_id()),
+            emit_desk('inventory_updated', {'auto': True, 'stats': scan_stats(games.active_id()),
                                             'undone': name})
     return name
 
@@ -2343,11 +2365,11 @@ def handle_add_inventory(data):
             logger.info(f"Adding card to inventory: {quantity}x {card['name']} ({condition}, {finish})")
             added_rows.append(scan_inventory.add_card(game.inventory_fields(card, finish), game.id, finish,
                                                       condition, quantity, capture=capture,
-                                                      location=scan_location()))
+                                                      location=scan_location(), source=desk().id))
             capture = None
 
             # Send updated stats and what was added (the page offers an Undo)
-            emit('inventory_updated', {'auto': False, 'stats': scan_inventory.get_stats(game.id),
+            emit('inventory_updated', {'auto': False, 'stats': scan_stats(game.id),
                                        'added': added_payload(game, card, finish, quantity)})
 
         logger.info("Card added to inventory successfully")
@@ -2481,7 +2503,7 @@ def handle_undo_last_add(data=None):
 
     undone = scan_inventory.undo_last_add(source=desk().id)
     if undone:
-        emit('inventory_undone', {'name': undone, 'stats': scan_inventory.get_stats(games.active().id)})
+        emit('inventory_undone', {'name': undone, 'stats': scan_stats(games.active().id)})
     else:
         emit('error', {'message': 'Nothing to undo'})
 

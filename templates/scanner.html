@@ -304,6 +304,8 @@
             <div class="modal-body">
                 <div class="inventory-controls">
                     <input type="text" id="inventory-search" placeholder="Filter by name, set, or rarity..." oninput="filterInventory()">
+                    <!-- Whose scanned cards: every camera's, or one's (shown when there are stations) -->
+                    <select id="inventory-camera" class="select" onchange="loadInventory()" title="Camera" hidden></select>
                     <select id="inventory-sort" class="select" onchange="setInventorySort(this.value)" title="Sort">
                         <option value="newest">Newest first</option>
                         <option value="oldest">Oldest first</option>
@@ -363,7 +365,7 @@
     {% include '_dialogs.html' %}
 
     <script src="{{ url_for('static', filename='js/audio.js') }}?v=29"></script>
-    <script src="{{ url_for('static', filename='js/common.js') }}?v=15"></script>
-    <script src="{{ url_for('static', filename='js/scanner.js') }}?v=51"></script>
+    <script src="{{ url_for('static', filename='js/common.js') }}?v=16"></script>
+    <script src="{{ url_for('static', filename='js/scanner.js') }}?v=52"></script>
 </body>
 </html>

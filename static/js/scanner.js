@@ -1442,8 +1442,29 @@ function closeInventory() {
     $('inventory-modal').classList.remove('show');
 }
 
-function loadInventory() {
-    return fetch('/api/inventory?area=scan')
+function scannedCamera() {
+    // The scanned cards' camera filter: a station id, or '' for every camera
+    return $('inventory-camera').value;
+}
+
+function loadInventoryCameras() {
+    // The camera choices of the scanned cards list; a station's page starts on its own
+    const select = $('inventory-camera');
+    return fetch('/api/stations')
+        .then(response => response.json())
+        .then(data => {
+            const chosen = select.options.length ? select.value : (STATION ? STATION.id : '');
+            select.innerHTML = '<option value="">All cameras</option>' + data.stations.map(station =>
+                `<option value="${escapeHtml(station.id)}">${escapeHtml(station.name)}</option>`).join('');
+            select.value = data.stations.some(station => station.id === chosen) ? chosen : '';
+            select.hidden = !data.stations.length;
+        })
+        .catch(error => console.error('Error loading the cameras:', error));
+}
+
+async function loadInventory() {
+    if (!$('inventory-camera').options.length) await loadInventoryCameras();
+    return fetch('/api/inventory?area=scan&camera=' + encodeURIComponent(scannedCamera()))
         .then(response => response.json())
         .then(data => {
             if (data.success) {
@@ -1490,6 +1511,9 @@ function inventoryRowHtml(card, index) {
                     ${special ? `<span class="inventory-badge ${escapeHtml(card.finish)}">${escapeHtml(finishLabel(card.finish).toUpperCase())}</span>` : ''}
                     ${card.color_identity ? `<span class="inventory-badge">${escapeHtml(card.color_identity)}</span>` : ''}
                     ${card.location ? `<span class="inventory-badge" title="Location">${escapeHtml(card.location)}</span>` : ''}
+                    ${Object.entries(card.cameras || {}).map(([camera, copies]) =>
+                        `<span class="inventory-badge" title="Scanned by this camera">${escapeHtml(camera)}${copies < card.quantity ? ' ' + copies : ''}</span>`).join('')}
+                    ${card.shared ? `<span class="inventory-badge" title="This entry has ${card.entry_quantity} copies: the others came from another camera">of ${card.entry_quantity}</span>` : ''}
                     <span>${escapeHtml(card.condition)}</span>
                 </div>
             </div>
@@ -1499,12 +1523,13 @@ function inventoryRowHtml(card, index) {
                 <div class="inventory-timestamp">${escapeHtml(card.timestamp)}</div>
             </div>
             <div class="inventory-card-actions">
+                ${card.shared ? '<span class="hint" title="Another camera scanned copies into the same entry. Choose All cameras to edit or delete it.">shared</span>' : `
                 <button class="btn-edit" data-id="${card.id}" title="Edit">
                     <svg class="icon"><use href="#i-edit"/></svg>
                 </button>
                 <button class="btn-delete" data-id="${card.id}" title="Delete">
                     <svg class="icon"><use href="#i-trash"/></svg>
-                </button>
+                </button>`}
             </div>
         </div>
     `;
@@ -1608,10 +1633,18 @@ function setupInventoryList() {
 
 async function addToCollection() {
     // Move what was scanned into the collection (the Collection page); the list here empties
-    if (await addScannedToCollection()) inventoryChanged();
+    // With a camera chosen in the list, only that camera's cards move
+    const select = $('inventory-camera');
+    const camera = scannedCamera();
+    if (await addScannedToCollection(camera, camera ? select.options[select.selectedIndex].text : '')) inventoryChanged();
 }
 
 async function clearInventory() {
+    if (scannedCamera()) {
+        // It deletes every camera's scanned cards: not from a list that shows one camera's
+        notify('"Clear all" deletes every camera\'s scanned cards - choose "All cameras" first', 'warning');
+        return;
+    }
     const count = $('inv-cards').textContent;
     const ok = await confirmDialog({
         title: 'Clear the scanned cards?',

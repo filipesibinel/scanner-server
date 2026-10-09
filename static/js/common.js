@@ -497,16 +497,18 @@ function decksHeadingHtml(select, labels) {
     return `<option disabled>${'─'.repeat(dashes)} Decks ${'─'.repeat(dashes)}</option>`;
 }
 
-async function addScannedToCollection() {
-    // Resolves true when the cards were moved (the page then reloads its lists)
+async function addScannedToCollection(camera = '', cameraName = '') {
+    // Resolves true when the cards were moved (the page then reloads its lists).
+    // camera: a station id - only the cards that camera scanned ('' = every camera's)
     try {
-        const waiting = await (await fetch('/api/scan_inventory/to_collection')).json();
+        const waiting = await (await fetch('/api/scan_inventory/to_collection?camera=' + encodeURIComponent(camera))).json();
         if (!waiting.cards) {
             notify('No scanned cards to add', 'info');
             return false;
         }
         document.getElementById('to-collection-message').textContent =
-            `The ${waiting.cards} scanned card${waiting.cards > 1 ? 's' : ''} move to your collection (cards you already have there get the copies added) and the scanned list is emptied.`;
+            camera ? `The ${waiting.cards} card${waiting.cards > 1 ? 's' : ''} scanned by ${cameraName || camera} move to your collection (cards you already have there get the copies added). The other cameras' cards stay in the scanned list.`
+                   : `The ${waiting.cards} scanned card${waiting.cards > 1 ? 's' : ''} move to your collection (cards you already have there get the copies added) and the scanned list is emptied.`;
         // The locations in use, to pick from; a new one is typed in the field below
         const used = document.getElementById('to-collection-used');
         // Boxes and binders first, the locations named after a deck under their own heading
@@ -530,7 +532,7 @@ async function addScannedToCollection() {
         const response = await fetch('/api/scan_inventory/to_collection', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({location: location})
+            body: JSON.stringify({location: location, camera: camera})
         });
         const data = await response.json();
         if (!data.success) throw new Error(data.error || 'Unknown error');

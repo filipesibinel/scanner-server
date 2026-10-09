@@ -102,7 +102,9 @@ venv/bin/python station_client.py --server http://<server>:5000
 - **Server or network down**: the station keeps scanning, and the captures wait and are sent
   when the server is back. Without a server at startup it waits for one (the camera's settings
   come from there).
-- One camera station at a time is the scanner page's camera; a second one connecting takes over.
+- **Several cameras**: start it on each camera's machine with its own `--id`. Each gets its
+  own page on the server, `http://<server>:5000/scan/<id>`, with its live view, its cards and
+  its review queue; `http://<server>:5000/` lists them.
 
 ## What the script does
 

@@ -57,6 +57,8 @@ with a fake camera (patch `detect_camera_type` / `_initialize_usb_camera`).
 | Card data updates (staged import, update check) | `database.py`: `replace_table`, `card_data_info`; `Game.check_for_update`; `app.py`: `start_card_data_update`, `check_card_data_updates` |
 | Card search / printing match / confidence (Magic) | `database.py`: `search_card_exact`, `search_card`, `find_printings`, `CONFIRMED_MATCHES`, `search_key`, `names_match` |
 | The scanner page's camera at a station (server has none: `camera.type: remote`) | `station_client.py`: `Station` (runs `CardScanner`; `hello`, `report_loop`, `on_command`, `auto_captured`, `upload_loop`); `remote_scanner.py`: `RemoteScanner` (stands in for `CardScanner` in `app.py`; `METHODS`, `DECIDED`, `SENT`, `CAMERA_SETTINGS`, the `/station` namespace); `app.py`: `station_capture` (`camera`, `mode`, `capture_id`) |
+| A page per camera: desks, rooms, the cameras' overview | `app.py`: `Desk`, `desk`, `desk_for`, `in_desk`, `emit_desk`, `make_remote_scanner`, `scan_page`, `handle_connect` (`page_stations`); `remote_scanner.py`: `CameraHub`; `stations.py`: `StationSettings`; `templates/stations.html`; `scanner.js`: `STATION` |
+| Scanned cards by camera (filter, per-camera move to the collection) | `inventory.py`: `inventory_sources`, `_station_rows`, `stations_by_entry`, `get_all_cards(station)`, `get_stats(station)`, `take_from(station)`; `app.py`: `scan_camera`, `scan_stats`; `scanner.js`: `scannedCamera`, `loadInventoryCameras`; `common.js`: `addScannedToCollection(camera)` |
 | Stations (cameras elsewhere that upload their captures) | `stations.py`: `Stations` (`data/stations.json`); `app.py`: `station_capture`, `station_capture_outcome`, `station_undo`, `station_list`, `station_item`; `scanner.js`: `loadStations`, `renderStations` (Settings) |
 | Captures in the queues kept across a restart | `pending.py`: `PendingCaptures` (`data/pending_captures.db`); `app.py`: `submit_capture` (every queued capture goes through it), `resume_pending` |
 | Capture orchestration, auto-add gate, events | `app.py`: `handle_auto_capture` (in `initialize_components`), `announce_and_route`, `route_identified` (returns the outcome), `search_and_emit_card`, `queue_changed`, `set_auto_add`; automatic adds on the server (`add_automatically`, `Game.suggested_finish`) |
@@ -137,6 +139,20 @@ with a fake camera (patch `detect_camera_type` / `_initialize_usb_camera`).
   from scanning code paths.
 - **New Socket.IO events** need a handler in `app.py` and in `static/js/scanner.js`, and a line
   in PROGRAM_DOCUMENTATION.md.
+- **One desk per camera** (`app.py`: `Desk`, `desk()`, `in_desk`, `desk_for`): the handlers
+  look single-camera but `scanner` is a proxy for `desk().scanner`, and the card on a page,
+  its open review and its capture are `desk().current_card_info` / `.current_review_id` /
+  `.pending_capture` - never module globals again. Code that runs outside a page's request
+  (threads, callbacks) must be inside `with in_desk(...)`, or it works for `default_desk`.
+  `scanner` is never `None`-comparable (`if scanner:` works, `scanner is None` does not).
+- **`emit_desk` vs `socketio.emit`**: what concerns one camera's card goes to its pages only
+  (`emit_desk`); `socketio.emit` reaches every camera's page - right only for shared things.
+  A scanner page gets `?station=` on every `/api/` request from the `fetch` wrapper at the top
+  of `scanner.js`; a new route that depends on the camera needs nothing more than `desk()`.
+- **Scanned cards and cameras**: entries merge across cameras; who scanned what is in
+  `inventory_sources` / `inventory_captures.station` (`add_card(source=...)`). Anything that
+  shows or moves "a camera's cards" goes through `_station_rows`; a filtered list's
+  `quantity` is the camera's copies, not the entry's (`entry_quantity`).
 - **Two programs now**: `app.py` is the server; `scanner.py` / `object_detector.py` run in
   `station_client.py` on the camera's machine (they still run inside `app.py` with a local
   camera, `camera.type` other than `remote`). Anything `app.py` reads or calls on `scanner`

@@ -80,7 +80,7 @@ UPSERT = '''
 # A move to the collection that is under way (take_from): noted in the inventory it moves from,
 # and - in the commit that brings the cards - in the one it moves to
 PENDING_MOVES_TABLE = ('CREATE TABLE IF NOT EXISTS pending_moves '
-                       '(game TEXT PRIMARY KEY, move_id TEXT NOT NULL, added_at TEXT NOT NULL)')
+                       '(game TEXT PRIMARY KEY, move_id TEXT NOT NULL, added_at TEXT NOT NULL, station TEXT)')
 ARRIVED_MOVES_TABLE = 'CREATE TABLE IF NOT EXISTS arrived_moves (move_id TEXT PRIMARY KEY)'
 
 
@@ -188,6 +188,21 @@ class InventoryManager:
                     captured_at TEXT NOT NULL
                 )''')
             self.conn.execute('CREATE INDEX IF NOT EXISTS idx_captures_entry ON inventory_captures(inventory_id)')
+            # Which camera scanned what (the scanned cards' camera filter): the station a capture
+            # came from, and how many of an entry's copies each station added. Entries merge
+            # across cameras, so this is kept beside them, not in them
+            if 'station' not in {row['name'] for row in self.conn.execute('PRAGMA table_info(inventory_captures)')}:
+                self.conn.execute('ALTER TABLE inventory_captures ADD COLUMN station TEXT')
+            self.conn.execute('''
+                CREATE TABLE IF NOT EXISTS inventory_sources (
+                    inventory_id INTEGER NOT NULL,
+                    station TEXT NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    PRIMARY KEY (inventory_id, station)
+                )''')
+            self.conn.execute(PENDING_MOVES_TABLE)
+            if 'station' not in {row['name'] for row in self.conn.execute('PRAGMA table_info(pending_moves)')}:
+                self.conn.execute('ALTER TABLE pending_moves ADD COLUMN station TEXT')
             self.conn.commit()
 
     def _backup_table(self, label):
@@ -314,6 +329,32 @@ class InventoryManager:
     def _drop_orphan_captures(self):
         self._delete_captures('inventory_id NOT IN (SELECT id FROM inventory)')
 
+    def _drop_orphan_sources(self):
+        # Entries are deleted in many places; a new entry must not inherit a deleted one's stations
+        self.conn.execute('DELETE FROM inventory_sources WHERE inventory_id NOT IN (SELECT id FROM inventory)')
+
+    def _station_rows(self, game, station):
+        """
+        [(inventory row, copies)] of a game's entries a station added copies of: as many as it
+        added, at most what the entry still has (copies removed since are nobody's)
+        """
+        self._drop_orphan_sources()
+        return [(row, min(row['station_copies'], row['quantity'])) for row in self.conn.execute(
+            '''SELECT i.*, s.quantity AS station_copies FROM inventory i
+               JOIN inventory_sources s ON s.inventory_id = i.id
+               WHERE i.game = ? AND s.station = ? AND s.quantity > 0 AND i.quantity > 0
+               ORDER BY i.timestamp DESC, i.id DESC''', (game, station)).fetchall()]
+
+    def stations_by_entry(self, game):
+        """{inventory id: {station id: copies it added}} of a game's entries"""
+        result = {}
+        with self._lock:
+            for row in self.conn.execute(
+                    '''SELECT s.inventory_id, s.station, MIN(s.quantity, i.quantity) AS copies FROM inventory_sources s
+                       JOIN inventory i ON i.id = s.inventory_id WHERE i.game = ? AND s.quantity > 0''', (game,)):
+                result.setdefault(row['inventory_id'], {})[row['station']] = row['copies']
+        return result
+
     def _move_captures(self, from_id, to_id, count=None):
         """Move the newest `count` captures (all if None) of one entry to another"""
         limit = '' if count is None else f'ORDER BY id DESC LIMIT {int(count)}'
@@ -326,9 +367,11 @@ class InventoryManager:
         self._delete_captures('''inventory_id = ? AND id NOT IN (SELECT id FROM inventory_captures
                                  WHERE inventory_id = ? ORDER BY id LIMIT ?)''', (row_id, row_id, quantity))
 
-    def captures_by_entry(self, game=None):
-        """{inventory id: [{'url', 'captured_at'}, ...] newest first}"""
-        where, params = ('WHERE i.game = ?', (game,)) if game else ('', ())
+    def captures_by_entry(self, game=None, station=None):
+        """{inventory id: [{'url', 'captured_at'}, ...] newest first} - with a station, only its captures"""
+        where, params = ('WHERE i.game = ?', (game,)) if game else ('WHERE 1', ())
+        if station:
+            where, params = where + ' AND c.station = ?', params + (station,)
         result = {}
         with self._lock:
             for row in self.conn.execute(f'''
@@ -369,8 +412,13 @@ class InventoryManager:
             capture_id = None
             if thumbnail:
                 capture_id = self.conn.execute(
-                    'INSERT INTO inventory_captures (inventory_id, file, captured_at) VALUES (?, ?, ?)',
-                    (row['id'], thumbnail, values['timestamp'])).lastrowid
+                    'INSERT INTO inventory_captures (inventory_id, file, captured_at, station) VALUES (?, ?, ?, ?)',
+                    (row['id'], thumbnail, values['timestamp'], source)).lastrowid
+            if source:
+                self._drop_orphan_sources()
+                self.conn.execute('''INSERT INTO inventory_sources (inventory_id, station, quantity) VALUES (?, ?, ?)
+                                     ON CONFLICT(inventory_id, station) DO UPDATE SET quantity = quantity + excluded.quantity''',
+                                  (row['id'], source, quantity))
             self.conn.commit()
             self.last_added[source] = (row['id'], quantity, capture_id)
         if not quiet:
@@ -399,6 +447,10 @@ class InventoryManager:
                               'added_quantity = MAX(0, COALESCE(added_quantity, quantity) - ?) WHERE id = ?',
                               (quantity, quantity, row_id))
             self.conn.execute('DELETE FROM inventory WHERE id = ? AND quantity <= 0', (row_id,))
+            if source:
+                self.conn.execute('UPDATE inventory_sources SET quantity = quantity - ? WHERE inventory_id = ? AND station = ?',
+                                  (quantity, row_id, source))
+                self.conn.execute('DELETE FROM inventory_sources WHERE quantity <= 0')
             if capture_id:
                 self._delete_captures('id = ?', (capture_id,))
             self._drop_orphan_captures()
@@ -410,8 +462,21 @@ class InventoryManager:
     # Reading
     # ------------------------------------------------------------------------
 
-    def get_all_cards(self, game=None):
-        """Inventory rows (newest first), optionally only one game's"""
+    def get_all_cards(self, game=None, station=None):
+        """
+        Inventory rows (newest first), optionally only one game's. With a station (the scanned
+        cards' camera filter): only what that station scanned - its copies of each entry (as
+        'quantity') and its captures.
+        """
+        if station:
+            with self._lock:
+                rows = self._station_rows(game, station)
+            captures = self.captures_by_entry(game, station)
+            # 'shared': another camera (or a manual add) has copies in the same entry - the page
+            # then offers no edit / delete, which would act on the whole entry
+            return [{**_row_dict(row), 'quantity': copies, 'entry_quantity': row['quantity'],
+                     'shared': copies != row['quantity'], 'captures': captures.get(row['id'], [])}
+                    for row, copies in rows]
         where, params = ('WHERE game = ?', (game,)) if game else ('', ())
         with self._lock:
             rows = self.conn.execute(f'SELECT * FROM inventory {where} ORDER BY timestamp DESC, id DESC', params).fetchall()
@@ -455,8 +520,16 @@ class InventoryManager:
                 "SELECT DISTINCT location FROM inventory WHERE game = ? AND location != '' "
                 'ORDER BY location COLLATE NOCASE', (game,))]
 
-    def get_stats(self, game=None):
-        """Totals for the top bar and the inventory window"""
+    def get_stats(self, game=None, station=None):
+        """Totals for the top bar and the inventory window - with a station, of what it scanned"""
+        if station:
+            with self._lock:
+                rows = self._station_rows(game, station)
+            finishes = {}
+            for row, copies in rows:
+                finishes[row['finish']] = finishes.get(row['finish'], 0) + copies
+            return {'total_cards': sum(copies for _, copies in rows), 'unique_cards': len(rows),
+                    'total_value': sum((row['price_usd'] or 0) * copies for row, copies in rows), 'finishes': finishes}
         where, params = ('WHERE game = ?', (game,)) if game else ('', ())
         with self._lock:
             row = self.conn.execute(f'''
@@ -640,32 +713,37 @@ class InventoryManager:
         self.log(f"Inventory: {action.replace('_', ' ')}{' ' + value if value else ''} - {changed} entries", level="success")
         return changed
 
-    def take_from(self, source, game, location=None):
+    def take_from(self, source, game, location=None, station=None):
         """
         Move every entry of a game from another inventory (the scanner's) into this one, with
         its captures; entries that exist here already get the copies added. With a location,
-        every entry arrives there, whatever location it was scanned into. Returns
+        every entry arrives there, whatever location it was scanned into. With a station, only
+        the copies that station scanned move (and its captures); the rest stays. Returns
         {'entries', 'cards'} moved.
         """
         added_at = now()  # one time for the whole batch (the collection page can filter by it)
         with self._lock, source._lock:
-            rows = source.conn.execute('SELECT * FROM inventory WHERE game = ? ORDER BY id', (game,)).fetchall()
-            if not rows:
+            if station:
+                moving = source._station_rows(game, station)
+            else:
+                moving = [(row, row['quantity']) for row in source.conn.execute(
+                    'SELECT * FROM inventory WHERE game = ? ORDER BY id', (game,)).fetchall()]
+            if not moving:
                 return {'entries': 0, 'cards': 0}
             # Two files, two commits: the move is noted in the source first, so a crash between
             # them is finished on the next start instead of leaving the cards in both
             # (finish_interrupted_moves)
             move_id = uuid.uuid4().hex
             source.conn.execute(PENDING_MOVES_TABLE)
-            source.conn.execute('INSERT OR REPLACE INTO pending_moves (game, move_id, added_at) VALUES (?, ?, ?)',
-                                (game, move_id, added_at))
+            source.conn.execute('INSERT OR REPLACE INTO pending_moves (game, move_id, added_at, station) VALUES (?, ?, ?, ?)',
+                                (game, move_id, added_at, station))
             source.conn.commit()
             try:
                 self.conn.execute(ARRIVED_MOVES_TABLE)
                 self.conn.execute('INSERT INTO arrived_moves (move_id) VALUES (?)', (move_id,))
-                for row in rows:
-                    values = dict(row)
-                    values.pop('id')
+                for row, copies in moving:
+                    values = {column: row[column] for column in row.keys() if column not in ('id', 'station_copies')}
+                    values['quantity'] = copies
                     values['added_at'] = added_at
                     if location:
                         values['location'] = location
@@ -674,8 +752,9 @@ class InventoryManager:
                         f"SELECT id FROM inventory WHERE {' AND '.join(c + ' = ?' for c in KEY_COLUMNS)}",
                         [values[c] for c in KEY_COLUMNS]).fetchone()['id']
                     self._add_tags(target, values['tags'])
-                    for capture in source.conn.execute(
-                            'SELECT file, captured_at FROM inventory_captures WHERE inventory_id = ? ORDER BY id', (row['id'],)):
+                    captures = ('SELECT file, captured_at FROM inventory_captures WHERE inventory_id = ? '
+                                + ('AND station = ? ' if station else '') + 'ORDER BY id')
+                    for capture in source.conn.execute(captures, (row['id'], station) if station else (row['id'],)):
                         self.conn.execute('INSERT INTO inventory_captures (inventory_id, file, captured_at) VALUES (?, ?, ?)',
                                           (target, capture['file'], capture['captured_at']))
                 self.conn.commit()
@@ -685,24 +764,44 @@ class InventoryManager:
                 source.conn.execute('DELETE FROM pending_moves WHERE game = ?', (game,))
                 source.conn.commit()
                 raise
-            self._remove_moved(source, game)
+            self._remove_moved(source, game, station)
             self.conn.execute('DELETE FROM arrived_moves WHERE move_id = ?', (move_id,))
             self.conn.commit()
-        moved = {'entries': len(rows), 'cards': sum(row['quantity'] for row in rows)}
+        moved = {'entries': len(moving), 'cards': sum(copies for _, copies in moving)}
         self.log(f"Added to the collection: {moved['cards']} cards ({moved['entries']} entries)", level="success")
         return moved
 
     @staticmethod
-    def _remove_moved(source, game):
+    def _remove_moved(source, game, station=None):
         """Second half of take_from: the cards are in the collection, so they go from the
         source - with the note of the move, in one commit. The capture rows go without their
-        files, which moved"""
-        source.conn.execute('DELETE FROM inventory_captures WHERE inventory_id IN '
-                            '(SELECT id FROM inventory WHERE game = ?)', (game,))
-        source.conn.execute('DELETE FROM inventory WHERE game = ?', (game,))
+        files, which moved. With a station only its copies and captures go: worked out again
+        from what the station added, which nothing has changed since the first half (also not
+        a crash in between - finish_interrupted_moves comes here too)"""
+        if station:
+            for row, copies in source._station_rows(game, station):
+                source.conn.execute(
+                    'UPDATE inventory SET quantity = quantity - ?, '
+                    'added_quantity = MAX(0, COALESCE(added_quantity, quantity) - ?) WHERE id = ?',
+                    (copies, copies, row['id']))
+                source.conn.execute('DELETE FROM inventory_captures WHERE inventory_id = ? AND station = ?',
+                                    (row['id'], station))
+            source.conn.execute('DELETE FROM inventory_sources WHERE station = ? AND inventory_id IN '
+                                '(SELECT id FROM inventory WHERE game = ?)', (station, game))
+            source.conn.execute('DELETE FROM inventory WHERE game = ? AND quantity <= 0', (game,))
+            source._drop_orphan_captures()
+            source._drop_orphan_sources()
+        else:
+            source.conn.execute('DELETE FROM inventory_captures WHERE inventory_id IN '
+                                '(SELECT id FROM inventory WHERE game = ?)', (game,))
+            source.conn.execute('DELETE FROM inventory WHERE game = ?', (game,))
+            source._drop_orphan_sources()
         source.conn.execute('DELETE FROM pending_moves WHERE game = ?', (game,))
         source.conn.commit()
-        source.last_added = {}
+        if station:
+            source.last_added.pop(station, None)  # the other cameras keep their Undo
+        else:
+            source.last_added = {}
 
     def finish_interrupted_moves(self, source):
         """
@@ -715,10 +814,10 @@ class InventoryManager:
         with self._lock, source._lock:
             source.conn.execute(PENDING_MOVES_TABLE)
             self.conn.execute(ARRIVED_MOVES_TABLE)
-            for move in source.conn.execute('SELECT game, move_id, added_at FROM pending_moves').fetchall():
+            for move in source.conn.execute('SELECT game, move_id, added_at, station FROM pending_moves').fetchall():
                 arrived = self.conn.execute('SELECT 1 FROM arrived_moves WHERE move_id = ?', (move['move_id'],)).fetchone()
                 if arrived:
-                    self._remove_moved(source, move['game'])
+                    self._remove_moved(source, move['game'], move['station'])
                     finished.append(move['game'])
                     self.log(f"Finished the interrupted \"Add to collection\" of {move['added_at']}: "
                              "the cards were in the collection already, removed from the scanned cards", level="warning")

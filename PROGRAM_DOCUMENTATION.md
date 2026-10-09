@@ -964,8 +964,55 @@ order from a queue, retries until the server has the image, then deletes its fil
 
 The client's own state decides `auto_capture_enabled`: a connection that drops and comes back
 goes on scanning; a client that restarts has it off, and the pages are told
-(`auto_capture_toggled`). Only one camera station at a time: a second one connecting replaces
-the first.
+(`auto_capture_toggled`). `CameraHub` keeps one `RemoteScanner` per station id; the same id
+connecting again replaces its earlier connection.
+
+### A page per camera
+
+Every station has its own scanner page, `/scan/<id>`: its live view and controls, the card it
+is showing, its review queue, its Undo, its activity log and its scanned-cards count. `/` lists
+the stations (`templates/stations.html`, refreshed from `GET /api/stations`: connected, card in
+view, scanning, cards to review) - or, when the server has a camera of its own (`camera.type`
+other than `remote`), is that camera's scanner page as before. A station that only uploads
+captures (a phone) has a page too, without the live view.
+
+On the server each station has a **desk** (`app.py: Desk`, `desk_for`): its scanner, the card
+on its page (`current_card_info`), its open review, the capture being reviewed, its captures
+being read. The handlers were written for one camera and still read that way: `desk()` gives
+the current desk and `scanner` is a proxy for `desk().scanner`. Which desk is current:
+
+| Where | The desk |
+|---|---|
+| A scanner page's Socket.IO event | The station the page named when it connected (`io({query: {station}})`, `page_stations`); the page's socket is in the room `station:<id>` |
+| An HTTP request | `?station=<id>` (the scanner page adds it to every `/api/` request - a wrapper around `fetch` at the top of `scanner.js`), or the id in `/api/stations/<id>/...` |
+| A worker thread | The one set with `in_desk(...)`: `submit_capture` remembers its desk for the result, the OCR / AI workers run each job in its desk (`Job.scope`), a `RemoteScanner`'s callbacks in its station's |
+| Anything else | `default_desk`: the server's own camera, or in remote mode a desk with no camera |
+
+Events about a card go to the desk's room only (`emit_desk`: captured, found, added, queued
+for review, log lines, the capture beep, camera settings); events about shared things stay
+broadcasts (card data, game, AI provider, the scanned list changing). Kept per station
+(`StationSettings`, in `stations.json`; a value the station doesn't have yet comes from
+`settings.json`): the camera settings, add automatically, debug trace, and its location.
+Shared by all: the game being scanned (switching it stops every camera), the AI provider,
+OCR first, sound, prompts.
+
+**The scanned cards are one list**, with a camera filter. `scan_inventory` records the
+station of every capture (`inventory_captures.station`) and how many of an entry's copies each
+station added (`inventory_sources`) - beside the entries, because the same printing scanned by
+two cameras into the same location is one entry. `GET /api/inventory?area=scan&camera=<id>`
+gives that camera's entries with its copies as `quantity` (`entry_quantity` is the entry's;
+`shared` when they differ - the page then offers no edit / delete, which act on the whole
+entry); without `camera` every entry, with `cameras: {name: copies}`. A station's page opens
+the list on its own camera and counts its own cards in the top bar (`scan_stats`).
+`POST /api/scan_inventory/to_collection` with `camera` moves only that camera's copies and
+captures (`take_from(station=...)`; the note in `pending_moves` carries the station, so a
+crash in between is finished for that camera only - simulated 2026-10-08: moved once, the
+other camera's copy still scanned). "Clear all" is refused while a camera is chosen. An entry
+edited into another one (location, finish) can lose its camera.
+
+Measured 2026-10-08 with two pages open at once (the laptop's camera and a station uploading
+captures): each page received only its own station's events, including the OCR / AI log
+lines; review queues, focus-check interval and location were each station's own.
 
 Measured 2026-10-08 (laptop with the Anker C200 on Wi-Fi, server in Docker): manual capture to
 card on the page 2.7 s when the AI had to read it, auto-capture to added 0.4 s (OCR); a focus
