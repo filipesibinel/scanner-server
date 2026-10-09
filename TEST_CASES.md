@@ -80,6 +80,7 @@ For data-changing tests compare database rows, summed quantities, per-finish pri
 | SCAN-13 | P1 I/E | Set location to blank, whitespace, and more than 60 characters. | Blank clears location; whitespace is trimmed and accepted length is limited consistently. |
 | SCAN-14 | P0 H/E | Capture with focus check enabled; observe beep timing. | Capture signal occurs after the image is taken; dropping next card after the signal cannot alter that image. |
 | SOUND-01 | P1 E | Enable/disable sound; set volume 0/30/100; reload/restart. | Preference persists; muted/zero volume is silent; enabled effects use chosen volume. |
+| SOUND-04 | P1 E | Switch *Capture beep* off and *Card added* on, scan a card; then the other way round; reload. | Only the sound left on is heard; errors and alerts still sound; both switches persist. **Not tested in a browser** (settings route and script syntax checked only) |
 | SOUND-02 | P2 E | Use a browser with suspended/unsupported Web Audio. | User interaction enables supported audio; audio failure does not block scanning. |
 | SOUND-03 | P1 I/E | Submit volume below 0, above 100, and malformed values. | Values are bounded or rejected; stored sound state remains usable. |
 

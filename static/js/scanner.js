@@ -311,12 +311,12 @@ socket.on('inventory_updated', function(data) {
     if (reviewItem) {
         // An automatic add while reviewing, or the reviewed card (the next item follows)
         if (added) addLog(timeNow(), 'success', `Added ${added.quantity}× ${added.name} (${added.finish})`);
-        if (!data.auto) audioManager.playSuccess();
+        if (!data.auto) audioManager.playAdded();
         return;
     }
 
     // The drop signal is the capture beep; adding (1-2 s later, after the AI) just dings
-    audioManager.playSuccess();
+    audioManager.playAdded();
 
     setCardPanel(`
         <div class="empty-state is-success">
@@ -726,8 +726,12 @@ function applySound(sound) {
     $('toggle-audio').checked = sound.enabled;
     $('audio-volume').value = sound.volume;
     $('volume-value').textContent = sound.volume + '%';
+    $('toggle-sound-capture').checked = sound.capture;
+    $('toggle-sound-added').checked = sound.added;
     audioManager.setEnabled(sound.enabled);
     audioManager.setVolume(sound.volume / 100);
+    audioManager.setMuted('capture', !sound.capture);
+    audioManager.setMuted('added', !sound.added);
 }
 
 function saveSound(change) {
@@ -1894,6 +1898,16 @@ function setupAudioControls() {
         saveSound({enabled: enabled});
         addLog(timeNow(), 'info', `Sound effects ${enabled ? 'enabled' : 'disabled'}`);
         if (enabled) audioManager.playSuccess();  // a test sound
+    });
+    onToggle('toggle-sound-capture', enabled => {
+        audioManager.setMuted('capture', !enabled);
+        saveSound({capture: enabled});
+        if (enabled) audioManager.playCapture();
+    });
+    onToggle('toggle-sound-added', enabled => {
+        audioManager.setMuted('added', !enabled);
+        saveSound({added: enabled});
+        if (enabled) audioManager.playAdded();
     });
 
     $('audio-volume').addEventListener('input', function(e) {

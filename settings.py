@@ -25,6 +25,8 @@ class Settings:
         'debug_trace': False,  # Log filtered detections, save frames of slow or doubtful captures
         'sound_enabled': True,  # Sound effects on the scanner page
         'sound_volume': 30,  # 0-100
+        'sound_capture': True,  # The capture beep (the signal to drop the next card)
+        'sound_added': True,  # The ding when a card is added to the scanned cards
         'focus_value': None,  # Locked manual focus position (None = continuous autofocus)
         'detection_enabled': True,
         'fixed_area_enabled': False,  # Judge cards by a fixed area instead of their outline (sleeves)

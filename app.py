@@ -2732,19 +2732,25 @@ def get_scan_settings():
 
 
 def sound_settings():
-    """Sound effects of the scanner page: {'enabled', 'volume' (0-100)}"""
+    """
+    Sound effects of the scanner page: {'enabled', 'volume' (0-100), 'capture', 'added'} - the
+    last two switch off the capture beep and the ding of an added card, each on its own
+    """
     settings = app_settings
     return {'enabled': bool(settings.get('sound_enabled', True)) if settings else True,
-            'volume': int(settings.get('sound_volume', 30)) if settings else 30}
+            'volume': int(settings.get('sound_volume', 30)) if settings else 30,
+            'capture': bool(settings.get('sound_capture', True)) if settings else True,
+            'added': bool(settings.get('sound_added', True)) if settings else True}
 
 
 @app.route('/api/sound', methods=['POST'])
 def set_sound():
-    """Remember the sound switch and / or the volume (JSON: 'enabled', 'volume' 0-100)"""
+    """Remember the sound switches and / or the volume (JSON: 'enabled', 'capture', 'added', 'volume' 0-100)"""
     data = request.get_json(silent=True) or {}
     try:
-        if 'enabled' in data:
-            app_settings.set('sound_enabled', bool(data['enabled']))
+        for key in ('enabled', 'capture', 'added'):
+            if key in data:
+                app_settings.set(f'sound_{key}', bool(data[key]))
         if 'volume' in data:
             app_settings.set('sound_volume', max(0, min(100, int(data['volume']))))
     except (TypeError, ValueError):

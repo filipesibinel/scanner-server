@@ -9,6 +9,7 @@ class AudioManager {
         this.audioContext = null;
         this.enabled = true;
         this.volume = 0.3; // Default 30% volume
+        this.muted = {}; // Single sounds switched off: 'capture', 'added'
         this.initAudioContext();
     }
 
@@ -103,6 +104,7 @@ class AudioManager {
      * Play capture sound (camera shutter click)
      */
     async playCapture() {
+        if (this.muted.capture) return;
         // VERY loud double-click for immediate feedback
         await this.playBeep(1200, 0.10, 'square');
         setTimeout(() => this.playBeep(1000, 0.08, 'square'), 100);
@@ -115,6 +117,13 @@ class AudioManager {
         // Two-tone ding: low to high (louder for batch mode)
         await this.playBeep(523, 0.12, 'sine'); // C5
         setTimeout(() => this.playBeep(659, 0.20, 'sine'), 100); // E5
+    }
+
+    /**
+     * Play the sound of a card added to the scanned cards (the success ding, with its own switch)
+     */
+    async playAdded() {
+        if (!this.muted.added) await this.playSuccess();
     }
 
     /**
@@ -177,6 +186,13 @@ class AudioManager {
      */
     setEnabled(enabled) {
         this.enabled = enabled;
+    }
+
+    /**
+     * Switch single sounds off ('capture': the capture beep, 'added': the ding of an added card)
+     */
+    setMuted(sound, muted) {
+        this.muted[sound] = muted;
     }
 
     /**

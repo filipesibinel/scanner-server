@@ -222,6 +222,20 @@
                         </span>
                         <input type="checkbox" class="switch" id="toggle-audio" checked>
                     </label>
+                    <label class="switch-row">
+                        <span class="switch-text">
+                            <span class="switch-title">Capture beep</span>
+                            <span class="switch-desc">When a card's picture is taken: the signal to drop the next card</span>
+                        </span>
+                        <input type="checkbox" class="switch" id="toggle-sound-capture" checked>
+                    </label>
+                    <label class="switch-row">
+                        <span class="switch-text">
+                            <span class="switch-title">Card added</span>
+                            <span class="switch-desc">When a card goes into the scanned cards</span>
+                        </span>
+                        <input type="checkbox" class="switch" id="toggle-sound-added" checked>
+                    </label>
                     <div class="volume-row">
                         <label for="audio-volume">Volume</label>
                         <input type="range" id="audio-volume" min="0" max="100" value="30">
@@ -364,8 +378,8 @@
 
     {% include '_dialogs.html' %}
 
-    <script src="{{ url_for('static', filename='js/audio.js') }}?v=29"></script>
+    <script src="{{ url_for('static', filename='js/audio.js') }}?v=30"></script>
     <script src="{{ url_for('static', filename='js/common.js') }}?v=16"></script>
-    <script src="{{ url_for('static', filename='js/scanner.js') }}?v=56"></script>
+    <script src="{{ url_for('static', filename='js/scanner.js') }}?v=57"></script>
 </body>
 </html>

@@ -411,7 +411,7 @@ those to one camera.
 | `PUT` / `DELETE /api/stations/<id>` | Rename a station or set its location; forget it (with its scanned cards and review items) |
 | `POST /api/stations/<id>/captures` | A card captured by a station (multipart `image`; optional `foil_image`, `foil_is_image`, `name`, `wait`, `capture_id`): read, then added or queued for review - see PROGRAM_DOCUMENTATION.md, Stations |
 | `GET /api/stations/<id>/captures/<n>`, `POST /api/stations/<id>/undo` | The outcome of a capture that was still pending; take back the station's last card |
-| `GET /api/scan_settings`, `POST /api/scan_location`, `POST /api/sound` | A camera's scanning settings; its location for scanned cards; the sound switch and volume |
+| `GET /api/scan_settings`, `POST /api/scan_location`, `POST /api/sound` | A camera's scanning settings; its location for scanned cards; the sound switches (all, capture beep, card added) and volume |
 | `GET /api/games` | Supported card games (finishes, export formats) and the active one |
 | `GET /api/inventory` | The active game's inventory (each entry has an `id` and its `captures`) |
 | `GET /captures/<file>`, `GET /review_images/<file>` | A capture thumbnail of an inventory entry; the capture of a review item |
