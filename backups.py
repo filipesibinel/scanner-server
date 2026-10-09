@@ -23,7 +23,10 @@ logger = logging.getLogger(__name__)
 # scripts/backup.sh archives everything.
 BACKUPS_DIR = Config.DATA_DIR / 'backups'
 BACKUP_ID = re.compile(r'^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(-\d+)?$')
-INVENTORY_TABLES = ('inventory', 'inventory_captures')
+# inventory_sources: which station scanned how many of an entry's copies (the scanned cards'
+# camera filter) - it goes with the entries, or a restore would leave today's ownership on
+# yesterday's entries
+INVENTORY_TABLES = ('inventory', 'inventory_captures', 'inventory_sources')
 DECK_TABLES = ('decks', 'deck_cards')
 KEEP_AUTOMATIC = 5  # backups made before a restore; the ones the user makes are kept until deleted
 KEEP_DAILY = 7      # backups made when the app starts (one per day, see create_daily)
@@ -63,8 +66,12 @@ def _link(source, target):
         shutil.copyfile(source, target)
 
 
-def create(inventory, scan_inventory, deck_store, note='', automatic=False, daily=False):
-    """Back up the collection, the scanned cards and the decks as they are now; returns its info"""
+def create(inventory, scan_inventory, deck_store, note='', automatic=False, daily=False, keep=None):
+    """
+    Back up the collection, the scanned cards and the decks as they are now; returns its info.
+    keep: the id of a backup that must not be cleared away to make room for this one (the one
+    about to be restored - it may be the oldest automatic backup itself).
+    """
     created = datetime.now()
     backup_id = created.strftime('%Y-%m-%d_%H-%M-%S')
     number = 1
@@ -107,10 +114,11 @@ def create(inventory, scan_inventory, deck_store, note='', automatic=False, dail
         raise
     logger.info(f"Backup {backup_id}: {info['cards']} cards, {info['scanned']} scanned, {info['decks']} decks")
     # Only its own kind makes room: the daily ones don't push out the ones before a restore
-    for kind, keep in (('daily', KEEP_DAILY if daily else None), ('automatic', KEEP_AUTOMATIC if automatic else None)):
-        if keep:
-            for old in [item for item in list_backups() if item.get(kind)][keep:]:
-                delete(old['id'])
+    for kind, limit in (('daily', KEEP_DAILY if daily else None), ('automatic', KEEP_AUTOMATIC if automatic else None)):
+        if limit:
+            for old in [item for item in list_backups() if item.get(kind)][limit:]:
+                if old['id'] != keep:
+                    delete(old['id'])
     return info
 
 
@@ -155,8 +163,10 @@ def restore(backup_id, inventory, scan_inventory, deck_store):
     {'restored': the backup's info, 'previous': the backup made of the state replaced}.
     """
     folder = _folder(backup_id)
+    # keep: the backup made here must not push out the one being restored (restoring the oldest
+    # of the automatic backups once deleted it before it was read)
     previous = create(inventory, scan_inventory, deck_store, note=f"Before restoring {backup_id.replace('_', ' ')}",
-                      automatic=True)
+                      automatic=True, keep=backup_id)
     source = sqlite3.connect(f"file:{folder / 'backup.db'}?mode=ro", uri=True)
     parts = _parts(inventory, scan_inventory, deck_store)
     try:
@@ -171,6 +181,10 @@ def restore(backup_id, inventory, scan_inventory, deck_store):
                         saved = _columns(source, prefix + table)
                         columns = [column for column in _columns(manager.conn, table) if column in saved]
                         manager.conn.execute(f'DELETE FROM {table}')
+                        if not saved:
+                            # A table the backup was made without (inventory_sources, before
+                            # stations): it stays empty - what is there now belongs to other entries
+                            continue
                         manager.conn.executemany(
                             f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})",
                             (tuple(row) for row in source.execute(f"SELECT {', '.join(columns)} FROM {prefix}{table}")))

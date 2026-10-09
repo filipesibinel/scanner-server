@@ -38,7 +38,8 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build   #
 Dependencies: `requirements.txt` (~300 MB, Python 3.10+). The dev venv on this machine is
 Python 3.12.
 
-There is no automated test suite. Verify changes by running the app (or a copy of it on another
+Tests: `venv/bin/python -m unittest discover tests` (station ownership through splits, merges,
+moves, clears and backups - on temporary databases). There is no test suite for the rest: verify changes by running the app (or a copy of it on another
 port with a copy of the database - never test adds against the real `data/cards_database.db`
 inventory or `data/scan_inventory.db`), and for scanner logic by feeding recorded/synthetic frames through `CardScanner`
 with a fake camera (patch `detect_camera_type` / `_initialize_usb_camera`).
@@ -152,7 +153,9 @@ with a fake camera (patch `detect_camera_type` / `_initialize_usb_camera`).
   of `scanner.js`; a new route that depends on the camera needs nothing more than `desk()`.
 - **Scanned cards and cameras**: entries merge across cameras; who scanned what is in
   `inventory_sources` / `inventory_captures.station` (`add_card(source=...)`). Anything that
-  shows or moves "a camera's cards" goes through `_station_rows`; a filtered list's
+  shows or moves "a camera's cards" goes through `_station_rows`; anything that moves copies
+  between entries must call `_move_sources` (before the quantity and captures change), and a new
+  table beside the entries belongs in `backups.INVENTORY_TABLES`; a filtered list's
   `quantity` is the camera's copies, not the entry's (`entry_quantity`).
 - **Two programs now**: `app.py` is the server; `scanner.py` / `object_detector.py` run in
   `station_client.py` on the camera's machine (they still run inside `app.py` with a local

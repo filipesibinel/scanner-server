@@ -361,6 +361,49 @@ class InventoryManager:
         self.conn.execute(f'''UPDATE inventory_captures SET inventory_id = ? WHERE id IN (
             SELECT id FROM inventory_captures WHERE inventory_id = ? {limit})''', (to_id, from_id))
 
+    def _move_sources(self, from_id, to_id, quantity=None):
+        """
+        Which station scanned them goes with copies that move from one entry to another (a
+        split or a merge; call it before the entry's quantity and captures change). All of the
+        entry's copies, or `quantity` of them: those are the newest ones, like the captures that
+        move with them - so the stations of the newest captures give up a copy each; and if the
+        copies that stay are fewer than the stations still claim (copies without a capture), the
+        station that scanned last gives up more.
+        """
+        # Newest station first where no capture says which scanned last (an add without a photo)
+        owned = {row['station']: row['quantity'] for row in self.conn.execute(
+            'SELECT station, quantity FROM inventory_sources WHERE inventory_id = ? AND quantity > 0 '
+            'ORDER BY rowid DESC', (from_id,))}
+        if not owned:
+            return
+        if quantity is None:
+            moving = dict(owned)
+        else:
+            moving = {station: 0 for station in owned}
+            newest = [row['station'] for row in self.conn.execute(
+                'SELECT station FROM inventory_captures WHERE inventory_id = ? ORDER BY id DESC', (from_id,))]
+            for station in newest[:quantity]:
+                if station in owned and moving[station] < owned[station]:
+                    moving[station] += 1
+            entry = self._get_row(from_id)
+            staying = max(0, (entry['quantity'] if entry else 0) - quantity)
+            too_many = sum(owned.values()) - sum(moving.values()) - staying
+            # Stations by their newest capture, then the ones without any
+            by_recency = list(dict.fromkeys(station for station in newest if station in owned)) \
+                + [station for station in owned if station not in newest]
+            for station in by_recency:
+                while too_many > 0 and moving[station] < owned[station] and sum(moving.values()) < quantity:
+                    moving[station] += 1
+                    too_many -= 1
+        for station, copies in moving.items():
+            if copies:
+                self.conn.execute('UPDATE inventory_sources SET quantity = quantity - ? WHERE inventory_id = ? AND station = ?',
+                                  (copies, from_id, station))
+                self.conn.execute("""INSERT INTO inventory_sources (inventory_id, station, quantity) VALUES (?, ?, ?)
+                                     ON CONFLICT(inventory_id, station) DO UPDATE SET quantity = quantity + excluded.quantity""",
+                                  (to_id, station, copies))
+        self.conn.execute('DELETE FROM inventory_sources WHERE quantity <= 0')
+
     def _trim_captures(self, row_id, quantity):
         """No more captures than copies: when copies are removed, the newest captures go -
         lowering a quantity is mostly taking back a card captured twice"""
@@ -578,8 +621,8 @@ class InventoryManager:
 
     def _copy_with(self, row, quantity, condition, finish, price=None, location=None, tags=None, printing=None):
         """Add `quantity` copies of an entry under another condition/finish/location/printing
-        (merging), with the newest `quantity` of its captures; returns the id of the entry they
-        went to"""
+        (merging), with the newest `quantity` of its captures and the stations that scanned
+        them; returns the id of the entry they went to"""
         values = dict(row)
         values.update(printing or {})
         values.update(quantity=quantity, condition=condition, finish=finish)
@@ -595,6 +638,7 @@ class InventoryManager:
             f"SELECT id FROM inventory WHERE {' AND '.join(c + ' = ?' for c in KEY_COLUMNS)}",
             [values[c] for c in KEY_COLUMNS]).fetchone()['id']
         self._add_tags(target, values['tags'])
+        self._move_sources(row['id'], target, quantity)
         self._move_captures(row['id'], target, quantity)
         return target
 
@@ -657,6 +701,8 @@ class InventoryManager:
                 (row['game'], *((printing or row)[column] for column in ('card_name', 'set_name', 'card_number')),
                  new_condition, new_finish, new_location, row_id)).fetchone()
             if twin:
+                # Which station scanned them goes along (only as many as go, if the quantity was lowered too)
+                self._move_sources(row_id, twin['id'], new_quantity if new_quantity < row['quantity'] else None)
                 self._trim_captures(row_id, new_quantity)
                 self._move_captures(row_id, twin['id'])
                 self.conn.execute('UPDATE inventory SET quantity = quantity + ? WHERE id = ?', (new_quantity, twin['id']))

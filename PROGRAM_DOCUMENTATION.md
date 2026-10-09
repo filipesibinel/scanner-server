@@ -1016,9 +1016,11 @@ crash in between is finished for that camera only - simulated 2026-10-08: moved 
 other camera's copy still scanned). The Clear button follows the filter too: with a camera
 chosen it deletes only that camera's copies and capture images (`clear_inventory(station=...)`,
 `POST /api/clear_inventory?area=scan&camera=<id>`), to scan its pile again; with "All cameras"
-everything. A camera's clear also drops its review queue items (`ReviewQueue.clear`; a review
-open on its page is closed); "All cameras" leaves the review queues alone. The capture count stays. An entry edited into another one
-(location, finish) can lose its camera.
+everything. Ownership follows the copies when an entry is split or merged (`_move_sources`: the
+stations of the newest captures give up a copy each, as those captures move too) and it is
+part of the backups (`inventory_sources` in `backups.py`; a backup from before stations
+restores with no ownership rather than today's). A camera's clear also drops its review queue items (`ReviewQueue.clear`; a review
+open on its page is closed); "All cameras" leaves the review queues alone. The capture count stays.
 
 Measured 2026-10-08 with two pages open at once (the laptop's camera and a station uploading
 captures): each page received only its own station's events, including the OCR / AI log
