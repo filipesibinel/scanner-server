@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark light">
+    <title>Cameras - Card Scanner</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=43">
+</head>
+<body>
+    {% include '_icons.html' %}
+
+    {# The cameras (stations): each has its own scanner page at /scan/<id>. Shown at / when
+       the server has no camera of its own (camera.type: remote) #}
+    {% set page = 'stations' %}
+    {% include '_topbar.html' %}
+
+    <main class="container">
+        <section class="panel">
+            <h2 class="section-title"><svg class="icon"><use href="#i-camera"/></svg> Cameras</h2>
+            <div class="station-cards" id="station-cards"></div>
+            <div class="hint" id="stations-hint"></div>
+        </section>
+    </main>
+
+    {% include '_dialogs.html' %}
+    <script src="{{ url_for('static', filename='js/common.js') }}?v=15"></script>
+    <script>
+        // Each page defines these two (common.js / _topbar.html)
+        function openSettings() { window.location.href = {{ settings_url|tojson }}; }
+        function inventoryChanged() {}
+
+        function renderStations(stations, tokenRequired) {
+            document.getElementById('station-cards').innerHTML = stations.map(station => {
+                const state = !station.connected ? (station.camera ? 'Camera not connected' : 'Sends captured cards')
+                    : station.camera_error ? 'No camera: ' + station.camera_error
+                    : station.scanning ? 'Scanning' : station.detected ? 'Card in view' : 'Connected';
+                return `
+                <a class="panel station-card" href="/scan/${encodeURIComponent(station.id)}">
+                    <strong>${escapeHtml(station.name)}</strong>
+                    <span class="station-state ${station.connected && !station.camera_error ? 'is-on' : ''}">${escapeHtml(state)}</span>
+                    <span class="hint">${station.captures} card${station.captures === 1 ? '' : 's'}${station.review ? ' · ' + station.review + ' to review' : ''}${station.location ? ' · into ' + escapeHtml(station.location) : ''}</span>
+                </a>`;
+            }).join('');
+            document.getElementById('stations-hint').textContent = (stations.length ? '' : 'No camera yet. ')
+                + `A camera connects with: station_client.py --server ${window.location.origin}`
+                + (tokenRequired ? ' (and the station token)' : '');
+        }
+
+        function loadStations() {
+            fetch('/api/stations')
+                .then(response => response.json())
+                .then(data => renderStations(data.stations, data.token_required))
+                .catch(error => console.error('Error loading stations:', error));
+        }
+        loadStations();
+        setInterval(loadStations, 2000);
+    </script>
+</body>
+</html>

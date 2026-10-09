@@ -12,6 +12,7 @@ looking a card up and adding it holds up neither stage. identify() runs both sta
 caller's thread.
 """
 
+import contextlib
 import logging
 import queue
 import threading
@@ -32,11 +33,14 @@ IDENTIFY, FOIL = 'identify', 'foil'
 class Job:
     """A capture on its way through the two stages"""
 
-    def __init__(self, image, foil_image, game_id, on_done):
+    def __init__(self, image, foil_image, game_id, on_done, scope=None):
         self.image = image
         self.foil_image = foil_image
         self.game_id = game_id  # the game being scanned at capture: not read as another game's card
         self.on_done = on_done  # on_done(card_info or None, seconds since submit)
+        # scope(): a context manager the job's work runs in - app.py makes the log lines go
+        # to the page of the camera the capture came from
+        self.scope = scope or contextlib.nullcontext
         self.submitted = time.time()
         self.ocr_info = None
         self.task = None  # IDENTIFY or FOIL, once OCR has passed it on
@@ -264,13 +268,13 @@ class Identification:
         self._running = False
         self.card_ocr.stop()
 
-    def submit(self, image, foil_image, game_id, on_done):
+    def submit(self, image, foil_image, game_id, on_done, scope=None):
         """
         Queue a capture. on_done(card_info or None, seconds) is called exactly once, from the
         one thread that hands results back - in the order cards are settled, not submitted.
         """
         self.last_capture = (image, foil_image)
-        self._ocr_queue.put(Job(image, foil_image, game_id, on_done))
+        self._ocr_queue.put(Job(image, foil_image, game_id, on_done, scope))
 
     def waiting(self):
         """(captures waiting for OCR, captures waiting for the AI) - not counting those being read"""
@@ -308,7 +312,8 @@ class Identification:
                     # the other game (the caller keeps it for its own game's review)
                     self._finish(job, None)
                     continue
-                job.ocr_info, job.task = self._read_with_ocr(job.image, job.foil_image)
+                with job.scope():
+                    job.ocr_info, job.task = self._read_with_ocr(job.image, job.foil_image)
                 if job.task:
                     self._ai_queue.put(job)
                 else:
@@ -327,7 +332,8 @@ class Identification:
             card_info = None
             try:
                 if job.game_id == games.active_id():
-                    card_info = self._ask_ai(job.task, job.image, job.foil_image, job.ocr_info)
+                    with job.scope():
+                        card_info = self._ask_ai(job.task, job.image, job.foil_image, job.ocr_info)
             except Exception as e:
                 logger.exception(f"AI stage failed: {e}")
                 self.log(f"AI processing error: {e}", level="error")

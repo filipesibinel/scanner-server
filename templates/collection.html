@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="dark light">
     <title>Collection - Card Scanner</title>
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=42">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=43">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/collection.css') }}?v=12">
 </head>
 <body>
@@ -357,7 +357,7 @@
                 </div>
                 <div class="settings-section">
                     <h3>Scanner</h3>
-                    <a class="btn btn-block" href="{{ url_for('index') }}#settings">Camera, AI, sound and card database</a>
+                    <a class="btn btn-block" href="{{ settings_url }}">Camera, AI, sound and card database</a>
                     <div class="hint">These settings are on the scanner page</div>
                 </div>
             </div>

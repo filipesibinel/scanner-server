@@ -18,6 +18,8 @@ from config import Config
 logger = logging.getLogger('database')
 
 REVIEW_DIR = Config.DATA_DIR / 'review'
+# count / first: every station's items (a station id or None - the scanner's own camera - narrows it)
+ANY = object()
 
 
 class ReviewQueue:
@@ -65,15 +67,23 @@ class ReviewQueue:
             self.conn.commit()
         return item_id
 
-    def count(self, game):
-        with self._lock:
-            return self.conn.execute('SELECT COUNT(*) FROM review_queue WHERE game = ?', (game,)).fetchone()[0]
+    @staticmethod
+    def _of(game, station):
+        if station is ANY:
+            return 'game = ?', (game,)
+        return 'game = ? AND station IS ?', (game, station)
 
-    def first(self, game):
-        """The oldest item of a game, and its position info: (item dict or None, total)"""
+    def count(self, game, station=ANY):
+        where, values = self._of(game, station)
         with self._lock:
-            row = self.conn.execute('SELECT * FROM review_queue WHERE game = ? ORDER BY id LIMIT 1', (game,)).fetchone()
-        return (dict(row) if row else None), self.count(game)
+            return self.conn.execute(f'SELECT COUNT(*) FROM review_queue WHERE {where}', values).fetchone()[0]
+
+    def first(self, game, station=ANY):
+        """The oldest item of a game (of one station), and its position info: (item dict or None, total)"""
+        where, values = self._of(game, station)
+        with self._lock:
+            row = self.conn.execute(f'SELECT * FROM review_queue WHERE {where} ORDER BY id LIMIT 1', values).fetchone()
+        return (dict(row) if row else None), self.count(game, station)
 
     def get(self, item_id):
         with self._lock:

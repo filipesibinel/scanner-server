@@ -51,7 +51,7 @@ class Stations:
         return bool(VALID_ID.match(station_id or ''))
 
     def _public(self, station_id):
-        return {'id': station_id, **self._stations[station_id]}
+        return {'id': station_id, **{k: v for k, v in self._stations[station_id].items() if k != 'settings'}}
 
     def get(self, station_id):
         with self._lock:
@@ -81,12 +81,31 @@ class Stations:
             return self._public(station_id)
 
     def seen(self, station_id, name=None):
-        """A station connected (remote_scanner.py): created if new, its count untouched"""
+        """
+        A camera station connected (remote_scanner.py): created if new, its count untouched.
+        It is marked as having a camera the server can show ('camera').
+        """
         with self._lock:
-            station = self.capture(station_id, name)
+            self.capture(station_id, name)
             self._stations[station_id]['captures'] -= 1
+            self._stations[station_id]['camera'] = True
             self._save()
             return self._public(station_id)
+
+    def setting(self, station_id, key, default=None):
+        with self._lock:
+            return self._stations.get(station_id, {}).get('settings', {}).get(key, default)
+
+    def has_setting(self, station_id, key):
+        with self._lock:
+            return key in self._stations.get(station_id, {}).get('settings', {})
+
+    def set_setting(self, station_id, key, value):
+        with self._lock:
+            station = self._stations.get(station_id)
+            if station is not None:
+                station.setdefault('settings', {})[key] = value
+                self._save()
 
     def update(self, station_id, name=None, location=None):
         """Rename a station / set where its cards are put (location None: as the scanner page's)"""
@@ -108,3 +127,24 @@ class Stations:
                 return False
             self._save()
             return True
+
+
+class StationSettings:
+    """
+    One station's settings, with settings.Settings' get / set: its camera's focus, rotation and
+    fixed area, whether its cards are added automatically, ... A setting the station doesn't
+    have yet is read from the app's settings.json (what the single camera used before stations).
+    """
+
+    def __init__(self, stations, station_id, fallback):
+        self.stations = stations
+        self.station_id = station_id
+        self.fallback = fallback
+
+    def get(self, key, default=None):
+        if self.stations.has_setting(self.station_id, key):
+            return self.stations.setting(self.station_id, key)
+        return self.fallback.get(key, default)
+
+    def set(self, key, value):
+        self.stations.set_setting(self.station_id, key, value)

@@ -2,7 +2,18 @@
 // the scanned cards list and the settings drawer.
 // Shared helpers (escapeHtml, dialogs, notify, the edit dialog, sorts) come from common.js.
 
-const socket = io();
+// The station this page shows (templates/scanner.html; null: the server's own camera). The
+// socket says so when it connects - the server then sends this page only that station's
+// events - and every /api/ request carries ?station=, added here once for all of them.
+const STATION = window.STATION || null;
+const socket = io(STATION ? {query: {station: STATION.id}} : {});
+if (STATION) {
+    const plainFetch = window.fetch.bind(window);
+    window.fetch = (url, options) => plainFetch(
+        typeof url === 'string' && url.startsWith('/api/')
+            ? url + (url.includes('?') ? '&' : '?') + 'station=' + encodeURIComponent(STATION.id) : url,
+        options);
+}
 const $ = id => document.getElementById(id);
 
 let cardNumber = 1;
@@ -284,11 +295,9 @@ socket.on('inventory_updated', function(data) {
     const added = data.added;
     loadStats();
 
-    if (data.station) {
-        // A card from a station (a camera elsewhere): it goes on in the background - the card
-        // on this page stays, and the station makes its own sounds
-        if (added) addLog(timeNow(), 'success', `[${data.station}] Added ${added.quantity}× ${added.name} (${added.finish})`);
-        if (data.undone) addLog(timeNow(), 'warning', `[${data.station}] Removed ${data.undone} from the inventory (undo)`);
+    if (data.undone) {
+        // This station's last card taken back (Settings -> Stations, or the station itself)
+        addLog(timeNow(), 'warning', `Removed ${data.undone} from the inventory (undo)`);
         if (isOpen('inventory-modal')) loadInventory();
         if ($('settings-drawer').classList.contains('show')) loadStations();
         return;
@@ -1652,13 +1661,14 @@ function loadStations() {
 
 function renderStations(stations, tokenRequired) {
     $('stations-hint').textContent =
-        `A station sends its cards to ${window.location.origin}/api/stations/<its id>/captures`
-        + (tokenRequired ? ' - with the station token set on this server.' : '. It appears here with its first card.');
+        `Each camera has its own page. A camera station connects with station_client.py --server ${window.location.origin}`
+        + (tokenRequired ? ' and the station token set on this server.' : '; it appears here when it first connects or sends a card.');
     $('stations-list').innerHTML = stations.length ? stations.map(station => {
         const id = escapeHtml(station.id);
         return `
         <div class="station" data-id="${id}">
             <div class="station-fields">
+                <a class="station-link ${station.connected ? 'is-on' : ''}" href="/scan/${id}" title="${station.connected ? 'Camera connected' : 'No camera connected'} - open its page"><svg class="icon"><use href="#i-camera"/></svg></a>
                 <input type="text" class="text-input" value="${escapeHtml(station.name)}" maxlength="60" title="Name"
                        aria-label="Station name" onchange="saveStation('${id}', {name: this.value})">
                 <input type="text" class="text-input" value="${escapeHtml(station.location || '')}" maxlength="60"

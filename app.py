@@ -4,8 +4,10 @@ Card Scanner Web Application
 Main Flask application with SocketIO - COMPLETE VERSION
 """
 
-from flask import Flask, render_template, Response, jsonify, request, send_file, send_from_directory
-from flask_socketio import SocketIO, emit
+from flask import Flask, render_template, Response, abort, has_request_context, jsonify, request, send_file, send_from_directory
+from flask_socketio import SocketIO, emit, join_room
+from werkzeug.local import LocalProxy
+import contextlib
 import collections
 import csv
 import hmac
@@ -197,17 +199,17 @@ from inventory import InventoryManager
 from decks import DeckManager
 import backups
 from recommendations import Recommendations, Unavailable
-from review import REVIEW_DIR, ReviewQueue
+from review import ANY, REVIEW_DIR, ReviewQueue
 import games
 from cleanup import cleanup_old_images, get_images_stats
 
 # Import scanner
 from scanner import CardScanner
-from remote_scanner import RemoteScanner
+from remote_scanner import CameraHub, RemoteScanner
 from settings import Settings
 from card_ocr import CardOcr
 from identification import Identification
-from stations import Stations
+from stations import Stations, StationSettings
 from pending import PendingCaptures
 
 # Initialize Flask app
@@ -229,7 +231,8 @@ socketio = SocketIO(
 SCAN_INVENTORY_FILE = Config.DATA_DIR / 'scan_inventory.db'
 
 # Global instances
-scanner = None
+app_settings = None       # settings.Settings: data/settings.json
+camera_hub = None         # remote_scanner.CameraHub: the stations' cameras
 identification = None     # identification.Identification: OCR, vision AI and their queues
 stations = None           # stations.Stations: cameras elsewhere that send their captures here
 pending = None            # pending.PendingCaptures: captures in the queues, on disk until settled
@@ -244,27 +247,125 @@ database = None
 inventory = None           # the collection (table inventory in the card database file)
 daily_backup_status = ''    # the startup banner's line about the day's backup
 scan_inventory = None      # what the scanner page adds to, until it is moved to the collection
-current_card_info = None
-current_review_id = None  # review queue item open on the page
-review_sid = None         # Socket.IO session of the page reviewing it (a reload / disconnect closes it)
 review = None             # review.ReviewQueue
 deck_store = None         # decks.DeckManager
 recommend = None          # recommendations.Recommendations
-# The capture being reviewed (image path): kept with the card added from it - also when the
-# card is found by a manual search after the AI couldn't identify it
-pending_capture = None
 auto_capture_counter = 1
-processing_queue_count = 0  # Captures being identified (shown on the scanner page)
-queue_count_lock = threading.Lock()
+
+
+class Desk:
+    """
+    One camera's side of the app: its scanner, the card on its page, its open review, its
+    captures being read. Every station has one (desk_for); default_desk is the camera plugged
+    into this machine - or, with camera.type remote, what a request that names no station gets.
+    The code below reaches the current one through desk() and the `scanner` proxy.
+    """
+
+    def __init__(self, station_id=None, scanner=None, review_filter=ANY):
+        self.id = station_id                # stations.py id; None: default_desk
+        self.scanner = scanner              # CardScanner / RemoteScanner
+        self.review_filter = review_filter  # whose review items its page shows (review.py)
+        self.current_card_info = None       # the card on its page, waiting for Add / Skip
+        self.current_review_id = None       # review queue item open on its page
+        self.review_sid = None              # Socket.IO session of the page reviewing it (a reload / disconnect closes it)
+        # The capture being reviewed (image path): kept with the card added from it - also
+        # when the card is found by a manual search after the AI couldn't identify it
+        self.pending_capture = None
+        self.processing = 0                 # captures being identified (shown on its page)
+
+    @property
+    def room(self):
+        """Socket.IO room of the pages showing this desk (None: every page)"""
+        return f"station:{self.id}" if self.id else None
+
+    @property
+    def station(self):
+        return stations.get(self.id) if self.id and stations else None
+
+
+default_desk = Desk()
+desks = {}            # station id -> Desk
+desks_lock = threading.RLock()
+page_stations = {}    # Socket.IO session of a scanner page -> the station it shows
+current = threading.local()  # .desk: set by in_desk for work outside a page's request
+
+
+def desk_for(station_id):
+    """A station's desk (made when first asked for), or None for an unknown station"""
+    with desks_lock:
+        found = desks.get(station_id)
+        if found is None and stations and station_id and stations.get(station_id) is not None:
+            found = desks[station_id] = Desk(station_id, review_filter=station_id)
+            found.scanner = camera_hub.scanner(station_id)
+        return found
+
+
+def desk():
+    """
+    The desk this code is working for: the one set with in_desk (worker threads, a station's
+    upload), else the station of the scanner page that sent the Socket.IO event, else the
+    station named in the request (?station=, /api/stations/<id>/...), else default_desk.
+    """
+    forced = getattr(current, 'desk', None)
+    if forced is not None:
+        return forced
+    if has_request_context():
+        sid = getattr(request, 'sid', None)
+        station_id = (page_stations.get(sid) if sid else
+                      request.args.get('station') or (request.view_args or {}).get('station_id'))
+        found = desk_for(station_id) if station_id else None
+        if found is not None:
+            return found
+    return default_desk
+
+
+@contextlib.contextmanager
+def in_desk(target):
+    previous = getattr(current, 'desk', None)
+    current.desk = target or default_desk
+    try:
+        yield current.desk
+    finally:
+        current.desk = previous
+
+
+def at_station(station_id, function, *args):
+    """Call function as the station's desk (callbacks of its RemoteScanner)"""
+    with in_desk(desk_for(station_id)):
+        return function(*args)
+
+
+def emit_desk(event, data):
+    """To the pages of the current desk (every page for default_desk)"""
+    socketio.emit(event, data, namespace='/', to=desk().room)
+
+
+# The current desk's scanner: `scanner.x` and `if scanner:` work as on the object itself
+scanner = LocalProxy(lambda: desk().scanner)
+
+
+def make_remote_scanner(station_id):
+    """CameraHub's factory: the stand-in for a station's camera, with the station's own settings"""
+    remote = RemoteScanner(
+        socketio, StationSettings(stations, station_id, app_settings),
+        log_callback=lambda message, level="info": at_station(station_id, log_to_client, message, level),
+        on_captured=lambda number: at_station(station_id, emit_desk, 'auto_capture_triggered', {
+            'counter': number, 'message': f'Auto-capture #{number}'}),
+        on_auto_capture_changed=lambda enabled: at_station(station_id, emit_desk, 'auto_capture_toggled',
+                                                           {'enabled': enabled}))
+    auto_add = bool(remote.settings.get('auto_add', True))
+    remote.fast_scan_mode = auto_add
+    remote.required_stable_frames = Config.FAST_SCAN_STABILITY_FRAMES if auto_add else Config.AUTO_CAPTURE_STABILITY_FRAMES
+    return remote
 
 
 def queue_changed(change):
-    """A capture went to be identified (+1) or is done (-1): tell the pages how many are being read"""
-    global processing_queue_count
-    with queue_count_lock:
-        processing_queue_count = max(0, processing_queue_count + change)
-        count = processing_queue_count
-    socketio.emit('processing_queue_update', {'queue_count': count}, namespace='/')
+    """A capture went to be identified (+1) or is done (-1): tell the desk's pages how many are being read"""
+    target = desk()
+    with desks_lock:
+        target.processing = max(0, target.processing + change)
+        count = target.processing
+    emit_desk('processing_queue_update', {'queue_count': count})
 
 
 def log_to_client(message, level="info"):
@@ -284,7 +385,7 @@ def log_to_client(message, level="info"):
         logger.info(message)
 
     # Send to web client via SocketIO
-    socketio.emit('log', {
+    emit_desk('log', {
         'timestamp': timestamp,
         'level': level,
         'message': message
@@ -315,8 +416,7 @@ def log_scanned_card(card_name, collector_number, ai_model, db_found, added_to_i
 
 
 def set_pending_capture(image_path):
-    global pending_capture
-    pending_capture = str(image_path) if image_path else None
+    desk().pending_capture = str(image_path) if image_path else None
 
 
 def queue_for_review(game, image_path, name='', number='', set_code='', foil='unknown', card=None, why=None,
@@ -326,7 +426,7 @@ def queue_for_review(game, image_path, name='', number='', set_code='', foil='un
     station: the stations.py station it came from (None: the scanner page's camera).
     Returns why it was queued.
     """
-    review.add(game.id, image_path, name, number, set_code, foil, card, station=station['id'] if station else None)
+    review.add(game.id, image_path, name, number, set_code, foil, card, station=desk().id)
     if card:
         why = why or 'printing not confirmed'
         what = f"{card['name']} ({why})"
@@ -335,9 +435,9 @@ def queue_for_review(game, image_path, name='', number='', set_code='', foil='un
         what = f"'{name}' (not found)" if name else "a card the AI couldn't read"
     log_to_client(f"{station_prefix(station)}Queued for review: {what}", level="warning")
     # queued: a card was just added to the queue (the page plays the queue alert)
-    socketio.emit('review_queue_update', {'count': review.count(game.id), 'queued': True}, namespace='/')
+    emit_desk('review_queue_update', {'count': review.count(game.id, desk().review_filter), 'queued': True})
     # Nothing waits on the page for this card (normal mode blocks auto-capture until Add / Skip)
-    if scanner and station is None:
+    if scanner:
         scanner.card_under_review = False
     return why
 
@@ -361,13 +461,13 @@ def route_identified(image_path, card_name, collector_number, set_code, processi
         # The game was switched while this capture waited for (or was with) the AI: it is not
         # looked up as a card of the other game - it waits in its own game's review queue,
         # without what was read (the prompt and parser may have been the other game's)
-        review.add(game_id, image_path, foil=foil, station=station['id'] if station else None)
+        review.add(game_id, image_path, foil=foil, station=desk().id)
         log_to_client(f"{station_prefix(station)}Captured before the game was switched: kept in the "
                       f"{games.get(game_id).label} review queue", level="warning")
-        if scanner and station is None:
+        if scanner:
             scanner.card_under_review = False
         return {'status': 'review', 'reason': 'game switched'}
-    reviewing = current_review_id is not None
+    reviewing = desk().current_review_id is not None
     if not fast and not reviewing:
         set_pending_capture(image_path)
     if card_name and card_name.strip():
@@ -386,8 +486,11 @@ def added_payload(game, card, finish, quantity):
 
 
 def scan_location():
-    """Where cards being scanned are put (the inventory location new entries get; '' = none)"""
-    return (scanner.settings.get('scan_location', '') if scanner else '') or ''
+    """Where cards being scanned are put (the inventory location new entries get; '' = none): each station has its own"""
+    station = desk().station
+    if station:
+        return station.get('location') or ''
+    return (app_settings.get('scan_location', '') if app_settings else '') or ''
 
 
 def add_automatically(game, card, image_path, foil, station=None, captured_at=None):
@@ -399,13 +502,11 @@ def add_automatically(game, card, image_path, foil, station=None, captured_at=No
     used if it has one, and the add is that station's to undo. Returns what was added (added_payload).
     """
     finish = game.suggested_finish(card, foil)
-    location = (station or {}).get('location')
     row_id = scan_inventory.add_card(game.inventory_fields(card, finish), game.id, finish, 'Near Mint', 1,
-                                     capture=image_path, location=scan_location() if location is None else location,
-                                     when=captured_at, source=station['id'] if station else None)
+                                     capture=image_path, location=scan_location(), when=captured_at,
+                                     source=desk().id)
     added = added_payload(game, card, finish, 1)
-    socketio.emit('inventory_updated', {'auto': True, 'stats': scan_inventory.get_stats(game.id), 'added': added,
-                                        'station': station['name'] if station else None}, namespace='/')
+    emit_desk('inventory_updated', {'auto': True, 'stats': scan_inventory.get_stats(game.id), 'added': added})
     start_price_update(game, card, [row_id])
     return added
 
@@ -427,7 +528,6 @@ def search_and_emit_card(card_name, collector_number, processing_time=None, was_
     Returns:
         dict: what became of the card (see route_identified)
     """
-    global current_card_info
 
     # Log search action
     if collector_number:
@@ -456,7 +556,7 @@ def search_and_emit_card(card_name, collector_number, processing_time=None, was_
         processing_time=processing_time
     )
 
-    if not auto_add and (was_fast_scan_mode or current_review_id is not None):
+    if not auto_add and (was_fast_scan_mode or desk().current_review_id is not None):
         why = queue_for_review(game, image_path, card_name, collector_number, set_code, foil, db_card_info,
                                why=None if was_fast_scan_mode else 'captured during a review', station=station)
         return {'status': 'review', 'reason': why}
@@ -468,18 +568,18 @@ def search_and_emit_card(card_name, collector_number, processing_time=None, was_
         db_card_info = game.with_prices(db_card_info)
         if image_path:
             db_card_info['capture'] = str(image_path)
-        current_card_info = db_card_info
-        socketio.emit('card_found', {
+        desk().current_card_info = db_card_info
+        emit_desk('card_found', {
             'card': game.card_payload(db_card_info),
             'auto_add': False
-        }, namespace='/')
+        })
     else:
         # Try to find similar cards
         similar = game.similar(card_name, limit=5)
         if similar:
-            socketio.emit('similar_cards', {'cards': similar}, namespace='/')
+            emit_desk('similar_cards', {'cards': similar})
         else:
-            socketio.emit('card_not_found', {'card_name': card_name}, namespace='/')
+            emit_desk('card_not_found', {'card_name': card_name})
 
     return {'status': 'shown'}
 
@@ -502,7 +602,7 @@ def announce_and_route(image_path, card_info, card_number, game_id, processing_t
         'card_number': card_number,
         'processing_time': processing_time,
         'foil': info.get('foil', 'unknown')
-    }, namespace='/', to=to)
+    }, namespace='/', to=to or desk().room)
     outcome = route_identified(image_path, info.get('name', ''), info.get('collector_number', ''),
                                info.get('set_code', ''), processing_time, info.get('foil', 'unknown'), fast=fast,
                                reader=info.get('reader'), game_id=game_id, station=station, captured_at=captured_at)
@@ -537,6 +637,7 @@ def submit_capture(image_path, image, foil_image, number, game_id, station=None,
     capture_id: the uploader's own id for the capture (see seen_captures)
     """
     captured_at = captured_at or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    owner = desk()  # the capture's desk: its pages get the log lines and the outcome
     if pending_id is None:
         pending_id = pending.add(game_id, station['id'] if station else None, number, Path(image_path).name,
                                  Path(foil_path).name if foil_path else None, foil_image is image, captured_at,
@@ -544,26 +645,27 @@ def submit_capture(image_path, image, foil_image, number, game_id, station=None,
     queue_changed(+1)
 
     def identified(card_info, seconds):
-        try:
-            outcome = announce_and_route(image_path, card_info, number, game_id, seconds, fast=True,
-                                         station=station, captured_at=captured_at)
-            outcome['seconds'] = round(seconds, 2)
-        except Exception as e:
-            # Off the record all the same: queued again at every start, it would fail every time
-            logger.exception(f"Capture {Path(image_path).name} could not be added or queued for review: {e}")
-            log_to_client(f"{station_prefix(station)}Capture {Path(image_path).name} failed: {e}", level="error")
-            outcome = {'status': 'error', 'message': str(e)}
-        finally:
-            pending.remove(pending_id)
-            if foil_path:
-                Path(foil_path).unlink(missing_ok=True)
-            queue_changed(-1)
+        with in_desk(owner):
+            try:
+                outcome = announce_and_route(image_path, card_info, number, game_id, seconds, fast=True,
+                                             station=station, captured_at=captured_at)
+                outcome['seconds'] = round(seconds, 2)
+            except Exception as e:
+                # Off the record all the same: queued again at every start, it would fail every time
+                logger.exception(f"Capture {Path(image_path).name} could not be added or queued for review: {e}")
+                log_to_client(f"{station_prefix(station)}Capture {Path(image_path).name} failed: {e}", level="error")
+                outcome = {'status': 'error', 'message': str(e)}
+            finally:
+                pending.remove(pending_id)
+                if foil_path:
+                    Path(foil_path).unlink(missing_ok=True)
+                queue_changed(-1)
         if outcome_key:
             remember_outcome(outcome_key, outcome)
         if on_outcome:
             on_outcome(outcome)
 
-    identification.submit(image, foil_image, game_id, identified)
+    identification.submit(image, foil_image, game_id, identified, scope=lambda: in_desk(owner))
 
 
 def remember_outcome(key, outcome):
@@ -595,13 +697,14 @@ def resume_pending():
         outcome_key = (row['sender'] or row['station'], row['number']) if row['sender'] or row['station'] else None
         if row['capture_id'] and outcome_key:
             seen_captures[row['capture_id']] = outcome_key
-        submit_capture(image_path, image, foil_image, row['number'], row['game'], station, row['captured_at'],
-                       foil_path=foil_path, pending_id=row['id'], outcome_key=outcome_key)
+        with in_desk(desk_for(row['station']) if row['station'] else None):
+            submit_capture(image_path, image, foil_image, row['number'], row['game'], station, row['captured_at'],
+                           foil_path=foil_path, pending_id=row['id'], outcome_key=outcome_key)
 
 
 def initialize_components():
     """Initialize all components"""
-    global scanner, identification, stations, pending, database, inventory, scan_inventory, review, deck_store, recommend
+    global app_settings, camera_hub, default_desk, identification, stations, pending, database, inventory, scan_inventory, review, deck_store, recommend
 
     logger.info("Initializing components...")
 
@@ -612,27 +715,26 @@ def initialize_components():
     logger.info("Initializing database...")
     database = CardDatabase()
 
-    # Initialize scanner
+    # Cameras: each station's is reached through the hub; with camera.type other than 'remote'
+    # there is also the one plugged into this machine (the default desk)
     logger.info("Initializing scanner...")
+    app_settings = Settings()
     stations = Stations()
+    camera_hub = CameraHub(socketio, stations, make_remote_scanner)
     if Config.CAMERA_TYPE.lower() == 'remote':
-        # No camera here: the scanner page shows the one of a station (station_client.py)
-        scanner = RemoteScanner(
-            socketio, Settings(), log_callback=log_to_client, stations=stations,
-            on_captured=lambda number: socketio.emit('auto_capture_triggered', {
-                'counter': number, 'message': f'Auto-capture #{number}'}, namespace='/'),
-            on_auto_capture_changed=lambda enabled: socketio.emit('auto_capture_toggled', {'enabled': enabled},
-                                                                  namespace='/'))
+        # A request that names no station has no camera: this one never connects
+        default_desk = Desk(scanner=RemoteScanner(socketio, app_settings))
     else:
-        scanner = CardScanner(log_callback=log_to_client)
-    set_auto_add(scanner.settings.get('auto_add', True))  # remembered in data/settings.json
+        default_desk = Desk(scanner=CardScanner(log_callback=log_to_client, settings=app_settings),
+                            review_filter=None)
+        set_auto_add(app_settings.get('auto_add', True))  # remembered in data/settings.json
     log_to_client("Scanner initialized", level="info")
 
     # Card games (Magic, ...) - each wraps its card data; the saved one is scanned
-    games.init(database, scanner.settings, log_callback=log_to_client)
+    games.init(database, app_settings, log_callback=log_to_client)
 
     # OCR and the vision AI, with a queue in front of each (shared by every camera)
-    identification = Identification(scanner.settings, log_callback=log_to_client)
+    identification = Identification(app_settings, log_callback=log_to_client)
     identification.start()
 
     # Note: get_ai_model_info() and log_scanned_card() are defined at module level
@@ -679,10 +781,10 @@ def initialize_components():
                 while scanner.focus_probe_running and time.time() < deadline:
                     time.sleep(0.05)
                 scanner.capture_pending = False
-                socketio.emit('auto_capture_triggered', {
+                emit_desk('auto_capture_triggered', {
                     'counter': current_capture_number,
                     'message': f'Auto-capture #{current_capture_number}'
-                }, namespace='/')
+                })
 
         current_capture_number = auto_capture_counter
         auto_capture_counter += 1
@@ -753,8 +855,26 @@ def initialize_components():
 
 @app.route('/')
 def index():
-    """Main page"""
-    return render_template('scanner.html')
+    """The cameras (stations), each with a link to its page - or, with a camera on this machine, its scanner page"""
+    if Config.CAMERA_TYPE.lower() == 'remote':
+        return render_template('stations.html')
+    return render_template('scanner.html', station=None)
+
+
+@app.route('/scan/<station_id>')
+def scan_page(station_id):
+    """A station's scanner page: its camera, its cards, its review queue"""
+    if desk_for(station_id) is None:
+        abort(404)
+    return render_template('scanner.html', station=stations.get(station_id))
+
+
+@app.context_processor
+def page_links():
+    """settings_url: where the camera / AI settings are - a scanner page (the first station's when there are several)"""
+    if Config.CAMERA_TYPE.lower() != 'remote' or not stations or not stations.all():
+        return {'settings_url': '/#settings'}
+    return {'settings_url': f"/scan/{stations.all()[0]['id']}#settings"}
 
 
 @app.route('/collection')
@@ -763,11 +883,11 @@ def collection():
     return render_template('collection.html')
 
 
-def generate_frames():
-    """MJPEG stream of the annotated live view (each new frame once; encoding is shared)"""
+def generate_frames(camera):
+    """MJPEG stream of a camera's annotated live view (each new frame once; encoding is shared)"""
     last_id = -1
     while True:
-        frame_id, jpeg = scanner.get_stream_jpeg() if scanner else (-1, None)
+        frame_id, jpeg = camera.get_stream_jpeg() if camera else (-1, None)
         if jpeg is None or frame_id == last_id:
             time.sleep(0.01)
             continue
@@ -786,7 +906,7 @@ def capture_thumbnail(name):
 def video_feed():
     """Video streaming route"""
     return Response(
-        generate_frames(),
+        generate_frames(desk().scanner),  # ?station= names the camera
         mimetype='multipart/x-mixed-replace; boundary=frame'
     )
 
@@ -799,7 +919,7 @@ def get_stats():
         return jsonify({
             'database': {'total_cards': game.card_count(), 'update': data_update_notices.get(game.id),
                          'updating': game.id in data_updates_running},
-            'review': review.count(game.id) if review else 0,
+            'review': review.count(game.id, desk().review_filter) if review else 0,
             # The scanner page's counters: what was scanned and not moved to the collection yet
             'inventory': scan_inventory.get_stats(game.id),
             'collection': inventory.get_stats(game.id)
@@ -1786,13 +1906,24 @@ def decode_upload(file):
 
 @app.route('/api/stations')
 def station_list():
-    return jsonify({'stations': stations.all(), 'token_required': bool(Config.STATION_TOKEN)})
+    """The stations, with whether each one's camera is connected and what it sees"""
+    listed = []
+    for station in stations.all():
+        connected = camera_hub.connected(station['id'])
+        status = camera_hub.scanner(station['id']).get_detection_status() if connected else {}
+        listed.append({**station, 'connected': connected, 'camera_error': status.get('camera_error'),
+                       'detected': bool(status.get('detected')),
+                       'scanning': bool(connected and camera_hub.scanner(station['id']).auto_capture_enabled),
+                       'review': review.count(games.active_id(), station['id'])})
+    return jsonify({'stations': listed, 'token_required': bool(Config.STATION_TOKEN)})
 
 
 @app.route('/api/stations/<station_id>', methods=['PUT', 'DELETE'])
 def station_item(station_id):
     """Rename a station, set the location its cards are put in, or forget it"""
     if request.method == 'DELETE':
+        with desks_lock:
+            desks.pop(station_id, None)
         return (jsonify({'success': True}) if stations.remove(station_id)
                 else (jsonify({'success': False, 'message': 'No such station'}), 404))
     data = request.get_json(silent=True) or {}
@@ -1812,7 +1943,7 @@ def station_capture(station_id):
       wait        optional: seconds to wait for the outcome (default 30; 0: answer at once)
       capture_id  optional: the station's own id for this capture - sent again, it is not a new one
       foil_is_image  optional, '1': image is the perspective-corrected card (no foil_image needed)
-      camera, mode   station_client.py: the scanner page's camera; mode 'review' = show it, don't add
+      camera, mode   station_client.py: mode 'review' = show it on the station's page, don't add
     The card is read (OCR, then the vision AI), and - as when adding automatically - added to
     the scanned cards if its printing is confirmed, else queued for review.
     Answers {'capture': n, 'status': 'added' | 'review' | 'pending', ...}; 202 while pending.
@@ -1853,10 +1984,9 @@ def station_capture(station_id):
     save_upload(image_path, data, image)
     game_id = games.active_id()
 
-    # The scanner page's camera (station_client.py) sends its captures like any station, but
-    # they are the page's: its location, its Undo, its card panel
-    is_camera = request.form.get('camera') == '1'
-    if is_camera and request.form.get('mode') == 'review':
+    # From here on desk() is this station's (the URL names it, and it exists now).
+    # station_client.py's mode 'review': the card is shown on the station's page, not added
+    if request.form.get('camera') == '1' and request.form.get('mode') == 'review':
         # A manual capture, or auto scanning that waits for Add / Skip: read now and shown
         queue_changed(+1)
         try:
@@ -1878,7 +2008,7 @@ def station_capture(station_id):
         save_upload(foil_path, foil_data, foil_image)
 
     done = threading.Event()
-    submit_capture(image_path, image, foil_image, number, game_id, None if is_camera else station,
+    submit_capture(image_path, image, foil_image, number, game_id, station,
                    on_outcome=lambda _outcome: done.set(), foil_path=foil_path, outcome_key=key, capture_id=capture_id)
     done.wait(wait)
     return capture_outcome_response(*key)
@@ -1907,9 +2037,10 @@ def undo_station_add(station):
     """Take back a station's most recent automatic add. Returns the card's name, or None"""
     name = scan_inventory.undo_last_add(source=station['id'])
     if name:
-        log_to_client(f"{station_prefix(station)}Removed {name} from the scanned cards (undo)", level="warning")
-        socketio.emit('inventory_updated', {'auto': True, 'stats': scan_inventory.get_stats(games.active_id()),
-                                            'station': station['name'], 'undone': name}, namespace='/')
+        with in_desk(desk_for(station['id'])):
+            log_to_client(f"{station_prefix(station)}Removed {name} from the scanned cards (undo)", level="warning")
+            emit_desk('inventory_updated', {'auto': True, 'stats': scan_inventory.get_stats(games.active_id()),
+                                            'undone': name})
     return name
 
 
@@ -1928,7 +2059,6 @@ def station_undo(station_id):
 @app.route('/api/detection_status')
 def get_detection_status():
     """Get current card detection status with detailed state information"""
-    global scanner
 
     if scanner:
         status = scanner.get_detection_status()
@@ -1946,7 +2076,6 @@ def get_detection_status():
 @app.route('/api/ai_provider')
 def get_ai_provider():
     """Get current AI provider and model for card identification"""
-    global scanner
 
     if identification and identification.card_identifier:
         return jsonify({
@@ -2056,8 +2185,13 @@ def get_local_ai_models():
 
 @socketio.on('connect')
 def handle_connect():
-    """Handle client connection"""
-    logger.info("Client connected to SocketIO")
+    """A page connected. A scanner page says which station it shows (?station=): it gets that desk's events"""
+    station_id = request.args.get('station')
+    target = desk_for(station_id) if station_id else None
+    if target is not None:
+        page_stations[request.sid] = station_id
+        join_room(target.room)
+    logger.info(f"Client connected to SocketIO{' for station ' + station_id if target else ''}")
     emit('log', {
         'timestamp': datetime.now().strftime('%H:%M:%S'),
         'level': 'info',
@@ -2068,7 +2202,6 @@ def handle_connect():
 @socketio.on('capture_card')
 def handle_capture(data):
     """Handle card capture request"""
-    global scanner, current_card_info
 
     if not scanner:
         emit('error', {'message': 'Scanner not initialized'})
@@ -2106,7 +2239,6 @@ def handle_capture(data):
 @socketio.on('search_card')
 def handle_search(data):
     """Handle manual card search - lists printings so the user can pick the exact one"""
-    global current_card_info
 
     logger.info(f"Search card request received: {data}")
 
@@ -2129,11 +2261,11 @@ def handle_search(data):
         resolved_name, printings = game.find_printings(card_name, collector_number, treatment, set_code)
 
         if len(printings) == 1:
-            current_card_info = printings[0]
-            emit('card_found', {'card': game.card_payload(current_card_info)})
+            desk().current_card_info = printings[0]
+            emit('card_found', {'card': game.card_payload(desk().current_card_info)})
         elif printings:
             # Several printings - let the user pick the one in hand
-            current_card_info = None
+            desk().current_card_info = None
             emit('card_printings', {
                 'name': resolved_name,
                 'treatment': treatment,
@@ -2162,7 +2294,6 @@ def handle_search(data):
 @socketio.on('select_printing')
 def handle_select_printing(data):
     """User picked a specific printing from the printing list"""
-    global current_card_info
 
     game = games.active()
     card = game.get_card(data.get('id')) if database else None
@@ -2170,7 +2301,7 @@ def handle_select_printing(data):
         emit('error', {'message': 'Printing not found'})
         return
 
-    current_card_info = card
+    desk().current_card_info = card
     logger.info(f"Printing selected: {card['name']} ({card['set']} #{card['number']})")
     emit('card_found', {'card': game.card_payload(card)})
 
@@ -2178,9 +2309,9 @@ def handle_select_printing(data):
 @socketio.on('add_to_inventory')
 def handle_add_inventory(data):
     """Handle add to inventory request"""
-    global inventory, current_card_info, scanner, current_review_id
+    global inventory
 
-    card = current_card_info
+    card = desk().current_card_info
     if not scan_inventory or not card:
         logger.warning("Add to inventory requested but no card selected")
         emit('error', {'message': 'No card selected'})
@@ -2198,8 +2329,8 @@ def handle_add_inventory(data):
                 return
 
         # The card's own capture, else the one under review; it goes with the first finish added
-        capture = card.pop('capture', None) or pending_capture
-        if capture == pending_capture:
+        capture = card.pop('capture', None) or desk().pending_capture
+        if capture == desk().pending_capture:
             set_pending_capture(None)
         added_rows = []
 
@@ -2221,12 +2352,12 @@ def handle_add_inventory(data):
 
         logger.info("Card added to inventory successfully")
         start_price_update(game, card, added_rows)
-        current_card_info = None
-        if current_review_id is not None:
+        desk().current_card_info = None
+        if desk().current_review_id is not None:
             # Reviewed: resolve the item and open the next one
-            review.remove(current_review_id)
-            current_review_id = None
-            emit('review_queue_update', {'count': review.count(game.id)}, broadcast=True)
+            review.remove(desk().current_review_id)
+            desk().current_review_id = None
+            emit_desk('review_queue_update', {'count': review.count(game.id, desk().review_filter)})
             handle_review_open()
 
         # Clear the review flag to allow next auto-capture
@@ -2274,20 +2405,19 @@ def update_added_prices(game, card, row_ids):
 @socketio.on('review_open')
 def handle_review_open(data=None):
     """Open the oldest item of the review queue (or say it is empty)"""
-    global current_card_info, current_review_id, review_sid
     game = games.active()
-    item, total = review.first(game.id)
-    current_review_id = item['id'] if item else None
-    review_sid = request.sid if item else None
+    item, total = review.first(game.id, desk().review_filter)
+    desk().current_review_id = item['id'] if item else None
+    desk().review_sid = request.sid if item else None
     if not item:
-        current_card_info = None
+        desk().current_card_info = None
         set_pending_capture(None)
         emit('review_item', {'id': None, 'total': 0})
         return
     card = game.get_card(item['card_id']) if item['card_id'] else None
     if card:
         card['match'] = item['match']
-    current_card_info = card
+    desk().current_card_info = card
     set_pending_capture(review.image_path(item))  # goes with whatever card is added for this item
     emit('review_item', {
         'id': item['id'],
@@ -2303,20 +2433,18 @@ def handle_review_open(data=None):
 @socketio.on('review_skip')
 def handle_review_skip(data=None):
     """Drop the open review item without adding anything"""
-    global current_card_info, current_review_id, review_sid
-    if current_review_id is not None:
-        review.remove(current_review_id)
-    current_review_id = current_card_info = review_sid = None
+    if desk().current_review_id is not None:
+        review.remove(desk().current_review_id)
+    desk().current_review_id = desk().current_card_info = desk().review_sid = None
     set_pending_capture(None)
-    emit('review_queue_update', {'count': review.count(games.active_id())}, broadcast=True)
+    emit_desk('review_queue_update', {'count': review.count(games.active_id(), desk().review_filter)})
     handle_review_open()  # the next one
 
 
 @socketio.on('review_close')
 def handle_review_close(data=None):
     """Leave the review; the open item stays in the queue"""
-    global current_card_info, current_review_id, review_sid
-    current_review_id = current_card_info = review_sid = None
+    desk().current_review_id = desk().current_card_info = desk().review_sid = None
     set_pending_capture(None)
 
 
@@ -2325,9 +2453,10 @@ def handle_disconnect(*_args):
     """The reviewing page went away (reload, closed, asleep): the review is closed, so later
     captures aren't sent to the queue and an Add can't resolve the item unseen (the page
     opens it again when it reconnects)"""
-    if review_sid is not None and request.sid == review_sid:
+    if desk().review_sid is not None and request.sid == desk().review_sid:
         logger.info("Reviewing page disconnected - review closed")
         handle_review_close()
+    page_stations.pop(request.sid, None)
 
 
 @app.route('/review_images/<path:name>')
@@ -2350,7 +2479,7 @@ def handle_undo_last_add(data=None):
             emit('error', {'message': 'Nothing to undo for this station'})
         return
 
-    undone = scan_inventory.undo_last_add()
+    undone = scan_inventory.undo_last_add(source=desk().id)
     if undone:
         emit('inventory_undone', {'name': undone, 'stats': scan_inventory.get_stats(games.active().id)})
     else:
@@ -2360,10 +2489,9 @@ def handle_undo_last_add(data=None):
 @socketio.on('dismiss_card')
 def handle_dismiss_card(data=None):
     """Handle card dismissal - user cancels current card review"""
-    global scanner, current_card_info
 
     logger.info("Card dismissed by user")
-    current_card_info = None
+    desk().current_card_info = None
     # "Not found" dismisses itself to let auto scanning go on; the capture stays for a
     # manual search. Skip drops it
     if not (data or {}).get('keep_capture'):
@@ -2380,7 +2508,6 @@ def handle_dismiss_card(data=None):
 @socketio.on('toggle_detection')
 def handle_toggle_detection(data):
     """Toggle card detection on/off"""
-    global scanner
 
     if not scanner:
         logger.error("Toggle detection requested but scanner not initialized")
@@ -2425,19 +2552,21 @@ def get_games():
 @socketio.on('set_game')
 def handle_set_game(data):
     """Switch the game being scanned (stops auto scanning; the current card is dropped)"""
-    global current_card_info, current_review_id, review_sid
     game_id = data.get('game')
     try:
         games.set_active(game_id)
     except ValueError as e:
         emit('error', {'message': str(e)})
         return
-    current_card_info = current_review_id = review_sid = None
-    set_pending_capture(None)
-    if scanner and scanner.auto_capture_enabled:
-        scanner.auto_capture_enabled = False
-        scanner.card_under_review = False
-        socketio.emit('auto_capture_toggled', {'enabled': False})
+    # The game is everyone's: every camera stops scanning and every page drops its card
+    for target in [default_desk, *list(desks.values())]:
+        with in_desk(target):
+            target.current_card_info = target.current_review_id = target.review_sid = None
+            set_pending_capture(None)
+            if scanner and scanner.auto_capture_enabled:
+                scanner.auto_capture_enabled = False
+                scanner.card_under_review = False
+                emit_desk('auto_capture_toggled', {'enabled': False})
     game = games.active()
     logger.info(f"Game switched to {game.label}")
     card_count = game.card_count()
@@ -2451,7 +2580,6 @@ def handle_set_game(data):
 @socketio.on('toggle_auto_capture')
 def handle_toggle_auto_capture(data):
     """Toggle auto-capture on/off"""
-    global scanner
 
     if not scanner:
         logger.error("Toggle auto-capture requested but scanner not initialized")
@@ -2489,7 +2617,7 @@ def set_auto_add(enabled):
 
 def saved_debug_mode():
     """Flask's debug mode for the next start: the switch in Settings, else flask.debug in config.yaml"""
-    return bool(scanner.settings.get('debug_mode', Config.DEBUG)) if scanner else bool(Config.DEBUG)
+    return bool(app_settings.get('debug_mode', Config.DEBUG)) if app_settings else bool(Config.DEBUG)
 
 
 @app.route('/api/scan_settings')
@@ -2515,7 +2643,7 @@ def get_scan_settings():
 
 def sound_settings():
     """Sound effects of the scanner page: {'enabled', 'volume' (0-100)}"""
-    settings = scanner.settings if scanner else None
+    settings = app_settings
     return {'enabled': bool(settings.get('sound_enabled', True)) if settings else True,
             'volume': int(settings.get('sound_volume', 30)) if settings else 30}
 
@@ -2526,9 +2654,9 @@ def set_sound():
     data = request.get_json(silent=True) or {}
     try:
         if 'enabled' in data:
-            scanner.settings.set('sound_enabled', bool(data['enabled']))
+            app_settings.set('sound_enabled', bool(data['enabled']))
         if 'volume' in data:
-            scanner.settings.set('sound_volume', max(0, min(100, int(data['volume']))))
+            app_settings.set('sound_volume', max(0, min(100, int(data['volume']))))
     except (TypeError, ValueError):
         return jsonify({'success': False, 'error': 'The volume must be a number from 0 to 100'}), 400
     return jsonify({'success': True, 'sound': sound_settings()})
@@ -2538,7 +2666,10 @@ def set_sound():
 def set_scan_location():
     """Set the inventory location scanned cards are added to ('' = none)"""
     location = str((request.get_json(silent=True) or {}).get('location') or '').strip()[:60]
-    scanner.settings.set('scan_location', location)
+    if desk().id:
+        stations.update(desk().id, location=location)  # a station's cards go to its own location
+    else:
+        app_settings.set('scan_location', location)
     log_to_client(f"Scanned cards go to: {location}" if location else "Scanned cards get no location")
     return jsonify({'success': True, 'scan_location': location})
 
@@ -2546,7 +2677,6 @@ def set_scan_location():
 @socketio.on('toggle_fast_scan')
 def handle_toggle_fast_scan(data):
     """Toggle adding auto-scanned cards to the inventory automatically (remembered)"""
-    global scanner
 
     if not scanner:
         logger.error("Toggle auto-add requested but scanner not initialized")
@@ -2574,7 +2704,6 @@ def handle_toggle_ocr(data):
 @socketio.on('toggle_debug_trace')
 def handle_toggle_debug_trace(data):
     """Toggle debug trace logging on/off (remembered)"""
-    global scanner
 
     if not scanner:
         logger.error("Toggle debug trace requested but scanner not initialized")
@@ -2595,7 +2724,7 @@ def handle_toggle_debug_mode(data):
         emit('error', {'message': 'Scanner not initialized'})
         return
     enabled = bool(data.get('enabled', False))
-    scanner.settings.set('debug_mode', enabled)
+    app_settings.set('debug_mode', enabled)
     emit('debug_mode_toggled', {'enabled': enabled, 'running': bool(debug_mode_running)})
     logger.info(f"Debug mode toggled: {enabled} (running: {debug_mode_running})")
     if enabled != bool(debug_mode_running):
@@ -2605,7 +2734,6 @@ def handle_toggle_debug_mode(data):
 @socketio.on('reset_focus')
 def handle_reset_focus():
     """Reset camera focus"""
-    global scanner
 
     if not scanner:
         logger.error("Reset focus requested but scanner not initialized")
@@ -2647,9 +2775,9 @@ def handle_set_camera_rotation(data):
     except (TypeError, ValueError) as e:
         emit('error', {'message': str(e)})
         return
-    socketio.emit('camera_rotation_updated', {'rotation': scanner.rotation, 'fixed_area_off': fixed_area_off})
+    emit_desk('camera_rotation_updated', {'rotation': scanner.rotation, 'fixed_area_off': fixed_area_off})
     if fixed_area_off:
-        socketio.emit('fixed_area_updated', {'enabled': False, 'area': scanner.fixed_area})
+        emit_desk('fixed_area_updated', {'enabled': False, 'area': scanner.fixed_area})
 
 
 @socketio.on('set_refocus_every')
@@ -2664,7 +2792,7 @@ def handle_set_refocus_every(data):
         emit('error', {'message': str(e)})
         emit('refocus_every_updated', {'captures': scanner.refocus_every})  # put the field back
         return
-    socketio.emit('refocus_every_updated', {'captures': scanner.refocus_every})
+    emit_desk('refocus_every_updated', {'captures': scanner.refocus_every})
 
 
 @socketio.on('set_fixed_area')
@@ -2707,13 +2835,12 @@ def handle_set_fixed_area(data):
         emit('error', {'message': str(e)})
         return
     logger.info(f"Fixed area: {'on' if state['enabled'] else 'off'} {state['area']}")
-    socketio.emit('fixed_area_updated', state)
+    emit_desk('fixed_area_updated', state)
 
 
 @socketio.on('set_ai_provider')
 def handle_set_ai_provider(data):
     """Set AI provider and/or model for card identification"""
-    global scanner
 
     if not scanner:
         logger.error("Set AI provider requested but scanner not initialized")

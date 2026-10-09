@@ -597,6 +597,41 @@ body {
     margin: 0;
 }
 
+.station-link {
+    display: inline-flex;
+    padding: 8px;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+}
+
+.station-link.is-on {
+    color: var(--success, #16a34a);
+}
+
+/* The cameras' overview page (templates/stations.html) */
+.station-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 16px;
+}
+
+.station-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    text-decoration: none;
+    color: inherit;
+}
+
+.station-card .station-state {
+    font-size: 13px;
+    color: var(--text-muted);
+}
+
+.station-card .station-state.is-on {
+    color: var(--success, #16a34a);
+}
+
 #stations-list + .hint {
     margin-top: 10px;
     overflow-wrap: anywhere;

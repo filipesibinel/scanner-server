@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-The scanner page's camera when it is at a station (camera.type: remote): station_client.py
-runs the real CardScanner - camera, outline detection, auto-capture, focus - next to the
-camera and connects here (Socket.IO namespace /station). RemoteScanner is what app.py holds
-in its place: the same attributes and methods, answered from the state the client reports
-several times a second, or passed on to the client and waited for.
+A camera at a station (camera.type: remote): station_client.py runs the real CardScanner -
+camera, outline detection, auto-capture, focus - next to the camera and connects here
+(Socket.IO namespace /station). RemoteScanner is what app.py holds in its place, one per
+station: the same attributes and methods, answered from the state the client reports several
+times a second, or passed on to the client and waited for. CameraHub takes the connections
+and gives each to its station's RemoteScanner.
 
   client -> server   hello (-> the camera's settings and what the server decides)
                      status (state + detection status; answered with whether the preview is watched)
@@ -47,14 +48,12 @@ NOT_CONNECTED = "No camera station connected - start station_client.py next to t
 
 
 class RemoteScanner:
-    def __init__(self, socketio, settings, log_callback=None, stations=None, on_captured=None,
-                 on_auto_capture_changed=None):
+    def __init__(self, socketio, settings, log_callback=None, on_captured=None, on_auto_capture_changed=None):
         self.__dict__['_decided'] = dict(DECIDED, debug_trace_enabled=bool(settings.get('debug_trace', False)))
         self.__dict__['_state'] = {}       # what the client last reported
         self.socketio = socketio
-        self.settings = settings
+        self.settings = settings          # this camera's (stations.StationSettings)
         self.log_callback = log_callback
-        self.stations = stations
         self.on_captured = on_captured                            # on_captured(number): the capture beep
         self.on_auto_capture_changed = on_auto_capture_changed    # the client's auto-capture went on / off
         self.auto_capture_callback = None                         # captures arrive as uploads instead
@@ -64,7 +63,6 @@ class RemoteScanner:
         self._preview = (-1, None)
         self._watched = 0.0   # when the preview was last asked for
         self._lock = threading.Lock()
-        self._register()
 
     # ------------------------------------------------------------------------
     # Attributes: as CardScanner's
@@ -213,8 +211,75 @@ class RemoteScanner:
         if before is not None and after != before and self.on_auto_capture_changed:
             self.on_auto_capture_changed(bool(after))
 
-    def _is_client(self):
-        return request.sid == self.sid
+    def attach(self, sid, station):
+        """A client connected for this station (one that was connected before is replaced)"""
+        with self._lock:
+            self.sid = sid
+            self.station = station
+            self._state.clear()
+            self._detection = {}
+            self._preview = (-1, None)
+        self.log(f"Camera station connected: {station['name']}", level="success")
+
+    def detach(self):
+        with self._lock:
+            name = self.station['name'] if self.station else '?'
+            self.sid = None
+            self._state.clear()
+            self._detection = {}
+            self._preview = (-1, None)
+        self.log(f"Camera station disconnected: {name}", level="warning")
+        if self.on_auto_capture_changed:
+            self.on_auto_capture_changed(False)
+
+    def hello(self):
+        """The camera's saved settings, and the attributes the server decides"""
+        return {'settings': {key: self.settings.get(key) for key in CAMERA_SETTINGS
+                             if self.settings.get(key) is not None},
+                'set': dict(self._decided)}
+
+    def status(self, data):
+        self._detection = data.get('detection') or {}
+        self._take_state(data.get('state'))
+        return {'preview': time.time() - self._watched < 2.0}
+
+    def preview(self, data):
+        if isinstance(data.get('jpeg'), (bytes, bytearray)):
+            self._preview = (self._preview[0] + 1 if self._preview[0] >= 0 else 0, bytes(data['jpeg']))
+
+    def setting(self, data):
+        if data.get('key') in CAMERA_SETTINGS:
+            self.settings.set(data['key'], data.get('value'))
+
+
+class CameraHub:
+    """The /station namespace: each connected client talks to its station's RemoteScanner"""
+
+    def __init__(self, socketio, stations, make_scanner):
+        self.socketio = socketio
+        self.stations = stations
+        self.make_scanner = make_scanner  # make_scanner(station id) -> RemoteScanner
+        self._scanners = {}               # station id -> RemoteScanner (made when first asked for)
+        self._by_sid = {}
+        self._lock = threading.Lock()
+        self._register()
+
+    def scanner(self, station_id):
+        with self._lock:
+            if station_id not in self._scanners:
+                self._scanners[station_id] = self.make_scanner(station_id)
+            return self._scanners[station_id]
+
+    def connected(self, station_id):
+        scanner = self._scanners.get(station_id)
+        return bool(scanner and scanner.connected)
+
+    def forget(self, station_id):
+        with self._lock:
+            self._scanners.pop(station_id, None)
+
+    def _client(self):
+        return self._by_sid.get(request.sid)
 
     def _register(self):
         socketio = self.socketio
@@ -226,67 +291,52 @@ class RemoteScanner:
                 logger.warning("A camera station was refused: wrong or missing station token")
                 return False
             station_id = str(auth.get('id') or '')
-            if self.stations and not self.stations.valid_id(station_id):
+            if not self.stations.valid_id(station_id):
                 return False
-            with self._lock:
-                replaced = self.station if self.sid else None
-                self.sid = request.sid
-                self.station = (self.stations.seen(station_id, auth.get('name')) if self.stations
-                                else {'id': station_id, 'name': auth.get('name') or station_id})
-                self._state.clear()
-                self._detection = {}
-                self._preview = (-1, None)
-            if replaced:
-                self.log(f"Camera station {replaced['name']} replaced by {self.station['name']}", level="warning")
-            self.log(f"Camera station connected: {self.station['name']}", level="success")
+            station = self.stations.seen(station_id, auth.get('name'))
+            scanner = self.scanner(station_id)
+            previous = scanner.sid
+            if previous:
+                self._by_sid.pop(previous, None)  # the same station again: the new connection counts
+            self._by_sid[request.sid] = scanner
+            scanner.attach(request.sid, station)
 
         @socketio.on('disconnect', namespace=NAMESPACE)
         def station_disconnect(*_args):
-            if not self._is_client():
-                return
-            with self._lock:
-                name = self.station['name'] if self.station else '?'
-                self.sid = None
-                self._state.clear()
-                self._detection = {}
-                self._preview = (-1, None)
-            self.log(f"Camera station disconnected: {name}", level="warning")
-            if self.on_auto_capture_changed:
-                self.on_auto_capture_changed(False)
+            scanner = self._by_sid.pop(request.sid, None)
+            if scanner and scanner.sid == request.sid:
+                scanner.detach()
 
         @socketio.on('hello', namespace=NAMESPACE)
         def station_hello(_data=None):
-            """The camera's saved settings, and the attributes the server decides"""
-            if not self._is_client():
-                return None
-            return {'settings': {key: self.settings.get(key) for key in CAMERA_SETTINGS
-                                 if self.settings.get(key) is not None},
-                    'set': dict(self._decided)}
+            scanner = self._client()
+            return scanner.hello() if scanner else None
 
         @socketio.on('status', namespace=NAMESPACE)
         def station_status(data):
-            if not self._is_client():
-                return None
-            self._detection = data.get('detection') or {}
-            self._take_state(data.get('state'))
-            return {'preview': time.time() - self._watched < 2.0}
+            scanner = self._client()
+            return scanner.status(data) if scanner else None
 
         @socketio.on('preview', namespace=NAMESPACE)
         def station_preview(data):
-            if self._is_client() and isinstance(data.get('jpeg'), (bytes, bytearray)):
-                self._preview = (self._preview[0] + 1 if self._preview[0] >= 0 else 0, bytes(data['jpeg']))
+            scanner = self._client()
+            if scanner:
+                scanner.preview(data)
 
         @socketio.on('setting', namespace=NAMESPACE)
         def station_setting(data):
-            if self._is_client() and data.get('key') in CAMERA_SETTINGS:
-                self.settings.set(data['key'], data.get('value'))
+            scanner = self._client()
+            if scanner:
+                scanner.setting(data)
 
         @socketio.on('log', namespace=NAMESPACE)
         def station_log(data):
-            if self._is_client():
-                self.log(str(data.get('message', '')), str(data.get('level', 'info')))
+            scanner = self._client()
+            if scanner:
+                scanner.log(str(data.get('message', '')), str(data.get('level', 'info')))
 
         @socketio.on('captured', namespace=NAMESPACE)
         def station_captured(data):
-            if self._is_client() and self.on_captured:
-                self.on_captured(data.get('number'))
+            scanner = self._client()
+            if scanner and scanner.on_captured:
+                scanner.on_captured(data.get('number'))

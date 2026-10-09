@@ -1,4 +1,4 @@
-{# The header of every page (page: 'scanner' or 'collection'): brand, page links and the settings
+{# The header of every page (page: 'scanner', 'stations' - the cameras' overview - or 'collection'): brand, page links and the settings
    button stay where they are from page to page; only the part between them is the page's own #}
 <header class="topbar">
     <div class="brand">
@@ -6,7 +6,7 @@
         Card Scanner
     </div>
     <nav class="page-nav">
-        <a class="page-link {{ 'is-active' if page == 'scanner' }}" href="{{ url_for('index') }}" title="Scan cards">
+        <a class="page-link {{ 'is-active' if page in ('scanner', 'stations') }}" href="{{ url_for('index') }}" title="Scan cards">
             <svg class="icon"><use href="#i-camera"/></svg> Scanner
         </a>
         <a class="page-link {{ 'is-active' if page == 'collection' }}" href="{{ url_for('collection') }}" title="Manage the inventory and build decks">
@@ -42,6 +42,8 @@
         </div>
         </div>
     </div>
+    {% elif page == 'stations' %}
+    <div class="topbar-page"></div>
     {% else %}
     <span class="game-label" id="game-label"></span>
     <nav class="tabs topbar-page" id="tabs">

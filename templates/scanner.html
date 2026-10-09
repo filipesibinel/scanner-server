@@ -4,15 +4,17 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="color-scheme" content="dark light">
-    <title>Card Scanner</title>
+    <title>{{ station.name + ' - ' if station }}Card Scanner</title>
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=42">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=43">
 </head>
 <body>
     {% include '_icons.html' %}
 
     {% set page = 'scanner' %}
     {% include '_topbar.html' %}
+    <!-- The station this page shows (none: the camera plugged into the server itself) -->
+    <script>window.STATION = {{ ({'id': station.id, 'name': station.name, 'camera': station.camera|default(false)} if station else none)|tojson }};</script>
 
     <main class="container">
         <div class="main-content">
@@ -51,9 +53,16 @@
                     </div>
                 </section>
 
-                <section class="panel video-section">
+                {% if station and not station.camera %}
+                <!-- A station that only sends captured cards (a phone): no live view to show or control -->
+                <section class="panel">
+                    <h2 class="section-title"><svg class="icon"><use href="#i-camera"/></svg> {{ station.name }}</h2>
+                    <div class="hint">This station captures cards itself and sends them here - there is no live view. Its cards, its review queue and its activity are on this page.</div>
+                </section>
+                {% endif %}
+                <section class="panel video-section" {{ 'style="display: none"'|safe if station and not station.camera }}>
                     <div class="panel-header">
-                        <h2 class="section-title"><svg class="icon"><use href="#i-camera"/></svg> Camera</h2>
+                        <h2 class="section-title"><svg class="icon"><use href="#i-camera"/></svg> {{ station.name if station else 'Camera' }}</h2>
                         <div class="panel-actions">
                             <label class="chip-toggle" title="Sleeved cards: judge cards by a fixed area of the image instead of their outline">
                                 <input type="checkbox" id="fixed-area-toggle">
@@ -68,7 +77,7 @@
                         </div>
                     </div>
                     <div class="video-container">
-                        <img src="{{ url_for('video_feed') }}" alt="Camera Feed" id="video-feed">
+                        <img src="{{ url_for('video_feed', station=station.id) if station else url_for('video_feed') }}" alt="Camera Feed" id="video-feed">
                         <!-- Drawing the fixed capture area (positioned over the image, see placeAreaLayer) -->
                         <div class="area-layer" id="area-layer">
                             <div class="area-rect" id="area-rect" hidden></div>
@@ -355,6 +364,6 @@
 
     <script src="{{ url_for('static', filename='js/audio.js') }}?v=29"></script>
     <script src="{{ url_for('static', filename='js/common.js') }}?v=15"></script>
-    <script src="{{ url_for('static', filename='js/scanner.js') }}?v=50"></script>
+    <script src="{{ url_for('static', filename='js/scanner.js') }}?v=51"></script>
 </body>
 </html>
