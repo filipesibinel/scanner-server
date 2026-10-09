@@ -259,3 +259,6 @@ data/api_keys.env
 
 # light-ocr reader (npm install in ocr/)
 node_modules/
+
+# Review notes kept locally, not part of the project
+CODE_REVIEW.md
