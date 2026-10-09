@@ -1,0 +1,32 @@
+# Camera station: the camera's side of the scanner, on the machine the USB webcam is plugged into.
+#   SCANNER_SERVER=http://<server>:5000 docker compose -f docker-compose.client.yml up -d --build
+# Settings go in the environment or in .env beside this file:
+#   SCANNER_SERVER         the scanner server (needed)
+#   SCANNER_CAMERA_INDEX   the camera: N of /dev/videoN, or its /dev/v4l/by-id/... path - that one stays
+#                          the same camera when the numbers change (default: camera.usb_index in config.yaml)
+#   SCANNER_STATION_ID     default: this machine's name;  SCANNER_STATION_NAME: shown on the server
+#   SCANNER_STATION_TOKEN  when the server has a station token
+services:
+  station:
+    build:
+      context: .
+      target: client
+    image: mtg-scanner-station
+    container_name: mtg-scanner-station
+    init: true
+    stop_signal: SIGINT  # like Ctrl+C: the camera is released
+    restart: unless-stopped
+    environment:
+      SCANNER_SERVER: ${SCANNER_SERVER:?set SCANNER_SERVER, e.g. http://192.168.1.20:5000}
+      SCANNER_CAMERA_INDEX: ${SCANNER_CAMERA_INDEX:-}
+      SCANNER_STATION_ID: ${SCANNER_STATION_ID:-}
+      SCANNER_STATION_NAME: ${SCANNER_STATION_NAME:-}
+      SCANNER_STATION_TOKEN: ${SCANNER_STATION_TOKEN:-}
+    volumes:
+      # The host's /dev with access to video devices only (major 81): a camera unplugged and
+      # plugged in again is found again, which a fixed "devices:" entry would not be
+      - /dev:/dev
+      - /etc/hostname:/etc/host_hostname:ro  # the default station id
+      - /etc/localtime:/etc/localtime:ro
+    device_cgroup_rules:
+      - "c 81:* rmw"

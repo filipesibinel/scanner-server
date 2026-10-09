@@ -11,6 +11,24 @@ from config_loader import get_config_loader
 config = get_config_loader()
 
 
+def usb_camera_index():
+    """
+    The USB camera's /dev/videoN number: camera.usb_index in config.yaml, or SCANNER_CAMERA_INDEX -
+    a number, or a device path such as /dev/v4l/by-id/usb-...-video-index0 (the same camera
+    whatever number it got this time)
+    """
+    value = os.getenv('SCANNER_CAMERA_INDEX')
+    if not value:
+        return config.get('camera', 'usb_index', default=0)
+    if value.isdigit():
+        return int(value)
+    device = os.path.realpath(value)
+    digits = device.removeprefix('/dev/video')
+    if not digits.isdigit():
+        raise ValueError(f"SCANNER_CAMERA_INDEX={value}: not a number or a /dev/videoN device ({device})")
+    return int(digits)
+
+
 class Config:
     """Application configuration - All values loaded from config.yaml"""
 
@@ -31,7 +49,7 @@ class Config:
     # Camera settings
     # 'remote': the camera is at a station (station_client.py) - also from the environment
     CAMERA_TYPE = os.getenv('SCANNER_CAMERA') or config.get('camera', 'type', default='auto')
-    USB_CAMERA_INDEX = config.get('camera', 'usb_index', default=0)
+    USB_CAMERA_INDEX = usb_camera_index()
     CAMERA_RESOLUTION = tuple(config.get('camera', 'resolution', default=[2560, 1440]))
     CAMERA_PREVIEW_RESOLUTION = tuple(config.get('camera', 'preview_resolution', default=[640, 480]))
     CAMERA_FPS = config.get('camera', 'fps', default=20)

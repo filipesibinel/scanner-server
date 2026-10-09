@@ -1,5 +1,6 @@
-# Card scanner images (docker-compose.yml builds them; see INSTALL.md)
-#   server - web app, card data, OCR reader and AI requests
+# Card scanner images (see INSTALL.md)
+#   server - web app, card data, OCR reader and AI requests (docker-compose.yml)
+#   client - a camera station: station_client.py next to the camera (docker-compose.client.yml)
 
 # The OCR reader's packages (light-ocr: Node.js, x86-64 only)
 FROM node:24-trixie-slim AS ocr
@@ -35,3 +36,24 @@ USER 1000:1000
 
 EXPOSE 5000
 ENTRYPOINT ["scripts/docker-entrypoint.sh"]
+
+
+# The camera station: camera, card detection and focus only - x86-64 and ARM64
+FROM python:3.12-slim-trixie AS client
+
+# v4l2-ctl: the USB camera's focus and zoom controls
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends v4l-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /app
+COPY requirements-client.txt .
+RUN pip install --no-cache-dir -r requirements-client.txt
+
+# Only what the station runs (station_client.py must not import the server's modules)
+COPY station_client.py scanner.py object_detector.py settings.py config.py config_loader.py config.yaml ./
+
+ENTRYPOINT ["python", "station_client.py"]

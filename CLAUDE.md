@@ -31,6 +31,7 @@ venv/bin/python setup_database.py         # (re)download the Scryfall card datab
 venv/bin/python cleanup.py --stats        # scanned images; --days N / --dry-run / --all
 docker compose up -d --build              # the server as a container (data/ and scanned_cards/ are volumes)
 venv/bin/python station_client.py --server http://<server>:5000   # the camera, on the machine it is plugged into
+docker compose -f docker-compose.client.yml up -d --build         # ... or as a container (SCANNER_SERVER in .env)
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build   # ... with OCR on an NVIDIA GPU
 ```
 
@@ -162,6 +163,8 @@ with a fake camera (patch `detect_camera_type` / `_initialize_usb_camera`).
 - **Camera settings live on the server**: the client's `CardScanner` gets a `ServerSettings`
   (get / set) filled by `hello`; a new per-camera setting key must be added to
   `CAMERA_SETTINGS` or it is neither sent nor saved.
+- **Client image** (`Dockerfile` target `client`): it copies a fixed list of files - a new
+  module that `scanner.py` or `station_client.py` imports must be added to that `COPY` line.
 - **Docker image** (`Dockerfile`, target `server`; INSTALL.md "Server in Docker"): light-ocr's
   native library needs glibc 2.38+ (Debian 13 base images - on Debian 12 OCR silently fails to
   start), and NVIDIA's Vulkan driver needs the X11 / GLVND libraries plus

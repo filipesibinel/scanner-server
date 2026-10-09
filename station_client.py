@@ -41,7 +41,9 @@ SETTABLE = ('fast_scan_mode', 'required_stable_frames', 'auto_capture_delay', 'd
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s', datefmt='%H:%M:%S')
 logger = logging.getLogger('station')
-logging.getLogger('scanner').propagate = False  # CardScanner's lines are logged here (send_log)
+# CardScanner's lines are logged here (send_log), not a second time by its own logger
+logging.getLogger('scanner').propagate = False
+logging.getLogger('scanner').addHandler(logging.NullHandler())
 
 
 class ServerSettings:
@@ -286,7 +288,10 @@ class Station:
 
 
 def main():
-    host = re.sub(r'[^A-Za-z0-9_-]', '-', socket.gethostname())[:40] or 'station'
+    # In a container the machine's name is the one mounted from the host (docker-compose.client.yml)
+    host_file = Path('/etc/host_hostname')
+    host = host_file.read_text().strip() if host_file.is_file() else socket.gethostname()
+    host = re.sub(r'[^A-Za-z0-9_-]', '-', host)[:40] or 'station'
     parser = argparse.ArgumentParser(description="Camera station for the card scanner server")
     parser.add_argument('--server', default=os.getenv('SCANNER_SERVER'), help="e.g. http://192.168.1.20:5000")
     parser.add_argument('--id', default=os.getenv('SCANNER_STATION_ID') or host,

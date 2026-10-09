@@ -93,7 +93,9 @@ sudo apt install v4l-utils           # v4l2-ctl: focus control (pacman -S v4l-ut
 venv/bin/python station_client.py --server http://<server>:5000
 ```
 
-- **Which camera**: `camera.usb_index` in `config.yaml` (`v4l2-ctl --list-devices`).
+- **Which camera**: `camera.usb_index` in `config.yaml` (`v4l2-ctl --list-devices`), or
+  `SCANNER_CAMERA_INDEX`: a number, or the camera's `/dev/v4l/by-id/...-video-index0` path, which
+  stays the same camera when the numbers change.
 - **Options**: `--id` (default: the machine's name), `--name` (shown on the server), `--token`
   (when the server has a station token) - or `SCANNER_SERVER`, `SCANNER_STATION_ID`,
   `SCANNER_STATION_NAME`, `SCANNER_STATION_TOKEN`.
@@ -105,6 +107,35 @@ venv/bin/python station_client.py --server http://<server>:5000
 - **Several cameras**: start it on each camera's machine with its own `--id`. Each gets its
   own page on the server, `http://<server>:5000/scan/<id>`, with its live view, its cards and
   its review queue; `http://<server>:5000/` lists them.
+
+### Camera station in Docker
+
+The same station as a container (`Dockerfile` target `client`, `docker-compose.client.yml`),
+for a USB webcam on any x86-64 or ARM64 Linux machine with Docker. Put its settings in `.env`
+beside the compose file:
+
+```
+SCANNER_SERVER=http://<server>:5000
+SCANNER_CAMERA_INDEX=/dev/v4l/by-id/<your camera>-video-index0
+SCANNER_STATION_NAME=Desk camera
+```
+
+```bash
+docker compose -f docker-compose.client.yml up -d --build
+docker compose -f docker-compose.client.yml logs -f
+```
+
+- The container gets the host's `/dev` with access to video devices only, so the camera can
+  be unplugged and plugged in again without restarting it (a camera named by number may come
+  back under another number - name it by its `by-id` path).
+- The station id defaults to the machine's name (`SCANNER_STATION_ID` to choose one).
+- Nothing is kept in the container: it can be removed and rebuilt at any time.
+- A Raspberry Pi camera module is not supported in the container (its software comes from
+  Raspberry Pi OS packages); use a USB webcam, or run `station_client.py` directly.
+
+Measured 2026-10-08 on a laptop (Ryzen 5 7235HS, Anker C200): image 510 MB, ~28% of one core,
+66 MB; live view 12 fps; a manual capture and a focus sweep asked from the server's page worked.
+Not tested: unplugging the camera while it runs, and the ARM64 build.
 
 ## What the script does
 
