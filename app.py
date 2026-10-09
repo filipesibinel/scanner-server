@@ -1,7 +1,22 @@
 #!/usr/bin/env python3
 """
-Card Scanner Web Application
-Main Flask application with SocketIO - COMPLETE VERSION
+The scanner server: the web pages, what happens to every captured card, the collection and decks.
+
+Cameras are elsewhere (stations: station_client.py, the Android app) and send one picture per
+card - or, with camera.type other than 'remote', one camera is opened here (CardScanner).
+
+How this file is laid out:
+  - logging, the Flask / Socket.IO app, the shared objects (database, inventories, ...)
+  - desks: one per camera - whose card, review and events something is (Desk, desk(), in_desk)
+  - a read card's way: route_identified -> search_and_emit_card -> add_automatically / queue_for_review
+  - captures waiting to be read: submit_capture, resume_pending (on record until settled)
+  - initialize_components: everything is created here, at startup
+  - routes: pages, inventory, backups, decks and deck ideas, stations, AI settings
+  - Socket.IO handlers of the scanner pages (capture, search, add, review, camera and AI settings)
+  - card data updates, cleanup, main()
+
+Two rules that are easy to break (see CLAUDE.md): what concerns one camera's card goes through
+desk() / emit_desk, and code running outside a page's request must be inside `with in_desk(...)`.
 """
 
 from flask import Flask, render_template, Response, abort, has_request_context, jsonify, request, send_file, send_from_directory
@@ -353,6 +368,8 @@ def make_remote_scanner(station_id):
             'counter': number, 'message': f'Auto-capture #{number}'}),
         on_auto_capture_changed=lambda enabled: at_station(station_id, emit_desk, 'auto_capture_toggled',
                                                            {'enabled': enabled}))
+    # What set_auto_add would do for a camera here: the station's saved choice, and the number of
+    # still frames that goes with it. Sent to the client when it connects (RemoteScanner.hello)
     auto_add = bool(remote.settings.get('auto_add', True))
     remote.fast_scan_mode = auto_add
     remote.required_stable_frames = Config.FAST_SCAN_STABILITY_FRAMES if auto_add else Config.AUTO_CAPTURE_STABILITY_FRAMES
@@ -828,6 +845,8 @@ def initialize_components():
                     cv2.imwrite(str(foil_path), cv2.cvtColor(foil_image, cv2.COLOR_RGB2BGR))
                 submit_capture(image_path, card_image_rgb, foil_image, current_capture_number, game_id,
                                foil_path=foil_path)
+                # submit_capture counts the capture as "being read" from here on (and counts it
+                # off when it is settled): take back this function's own count
                 queued = True
                 queue_changed(-1)
                 scanner.card_under_review = False
@@ -2072,6 +2091,8 @@ def station_capture(station_id):
         foil_path = foil_file(image_path)
         save_upload(foil_path, foil_data, foil_image)
 
+    # The capture is in the queues now, whatever happens to this request. Wait for its outcome as
+    # long as the station asked; what is known then is the answer (still being read: 202 pending)
     done = threading.Event()
     submit_capture(image_path, image, foil_image, number, game_id, station,
                    on_outcome=lambda _outcome: done.set(), foil_path=foil_path, outcome_key=key, capture_id=capture_id)

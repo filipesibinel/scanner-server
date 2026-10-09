@@ -1,7 +1,9 @@
 # ============================================================================
 # FILE: config.py
-# Configuration settings for the card scanner
-# All settings are loaded from config.yaml
+# Configuration of the server and of a camera station: config.yaml, with a few
+# values that the environment can set instead (Docker): SCANNER_CAMERA,
+# SCANNER_CAMERA_INDEX, SCANNER_STATION_TOKEN, VISION_AI_PROVIDER, LOCAL_AI_*.
+# A station only uses the camera, detection and auto-capture values.
 # ============================================================================
 import os
 from pathlib import Path

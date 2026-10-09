@@ -1,6 +1,9 @@
 # ============================================================================
 # FILE: settings.py
-# User preferences and settings persistence
+# Choices made in the web interface, kept in data/settings.json on the server:
+# the ones that are everyone's (AI provider and model, OCR first, sound, game),
+# and the camera settings of a camera on the server itself - which a station
+# inherits until it has its own (stations.StationSettings).
 # ============================================================================
 import json
 import os

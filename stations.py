@@ -74,6 +74,7 @@ class Stations:
                     'name': (name or '').strip()[:60] or station_id, 'renamed': False,
                     'location': None, 'created': now(), 'captures': 0}
             elif name and name.strip() and not station.get('renamed'):
+                # The station's own name for itself counts until someone renames it on the server
                 station['name'] = name.strip()[:60]
             station['captures'] += 1
             station['last_seen'] = now()
@@ -86,6 +87,7 @@ class Stations:
         It is marked as having a camera the server can show ('camera').
         """
         with self._lock:
+            # As a capture (created if new, name and last_seen updated) - except that it isn't one
             self.capture(station_id, name)
             self._stations[station_id]['captures'] -= 1
             self._stations[station_id]['camera'] = True

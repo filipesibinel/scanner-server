@@ -3,8 +3,9 @@ Review queue: captures that were not added automatically (printing not confirmed
 found, nothing read) while cards are added automatically. Scanning goes on; the queue is
 worked through at the end, with the capture next to the suggested card and a manual search.
 
-Items live in the card database file (table `review_queue`), per game, with a copy of the
-capture in data/review/ (scanned_cards/ is cleaned after cleanup.days) until resolved.
+Items live in the card database file (table `review_queue`), per game and per station - each
+camera's page shows its own - with a copy of the capture in data/review/ (scanned_cards/ is
+cleaned after cleanup.days) until resolved.
 """
 import logging
 import shutil

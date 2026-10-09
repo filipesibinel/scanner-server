@@ -48,7 +48,15 @@ NOT_CONNECTED = "No camera station connected - start station_client.py next to t
 
 
 class RemoteScanner:
+    """
+    One station's camera, as app.py sees it. Reading an attribute answers from what the client
+    last reported (or, with no client connected, from the saved settings); setting one of the
+    DECIDED / SENT attributes sends it to the client; the methods below run on the client and
+    wait for its answer.
+    """
+
     def __init__(self, socketio, settings, log_callback=None, on_captured=None, on_auto_capture_changed=None):
+        # Through __dict__: __setattr__ / __getattr__ below need these two before anything else is set
         self.__dict__['_decided'] = dict(DECIDED, debug_trace_enabled=bool(settings.get('debug_trace', False)))
         self.__dict__['_state'] = {}       # what the client last reported
         self.socketio = socketio
@@ -69,6 +77,8 @@ class RemoteScanner:
     # ------------------------------------------------------------------------
 
     def __setattr__(self, name, value):
+        # `scanner.card_under_review = False` in app.py: remembered here and sent to the client.
+        # A DECIDED value is kept apart from the client's reports, which never overwrite it
         if name in DECIDED or name in SENT:
             if name in DECIDED:
                 self._decided[name] = value
@@ -242,6 +252,8 @@ class RemoteScanner:
     def status(self, data):
         self._detection = data.get('detection') or {}
         self._take_state(data.get('state'))
+        # The client only sends the live view while someone looks at it: a page showing
+        # /video_feed asks for the newest frame all the time (get_stream_jpeg), nobody for 2 s = no page
         return {'preview': time.time() - self._watched < 2.0}
 
     def preview(self, data):

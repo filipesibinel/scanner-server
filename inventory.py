@@ -1,6 +1,9 @@
 # ============================================================================
 # FILE: inventory.py
-# Inventory management using SQLite database
+# An inventory in a SQLite file: entries (one per printing + condition + finish +
+# location), the captures behind them, and which station scanned how many copies.
+# The server has two: the collection (in the card database file) and the scanned
+# cards (scan_inventory.db), which move into the collection with take_from.
 # ============================================================================
 import csv
 import re
@@ -458,6 +461,7 @@ class InventoryManager:
                     'INSERT INTO inventory_captures (inventory_id, file, captured_at, station) VALUES (?, ?, ?, ?)',
                     (row['id'], thumbnail, values['timestamp'], source)).lastrowid
             if source:
+                # Beside the entry, not in it: the same printing scanned by two cameras is one entry
                 self._drop_orphan_sources()
                 self.conn.execute('''INSERT INTO inventory_sources (inventory_id, station, quantity) VALUES (?, ?, ?)
                                      ON CONFLICT(inventory_id, station) DO UPDATE SET quantity = quantity + excluded.quantity''',

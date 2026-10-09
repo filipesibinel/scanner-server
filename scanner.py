@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
 """
-Scanner Module - Updated with AI-based Object Detection
-Camera and card scanning logic with real-time object detection.
+The camera side of the scanner: CardScanner reads the camera, finds the card in every frame
+(object_detector.py), decides when it lies still and whether it is a new card, takes the
+capture, and keeps the lens in focus.
+
+It runs next to the camera: inside station_client.py on a camera station, or inside app.py when
+the server has a camera of its own. It knows nothing about card data, OCR or the AI - a capture
+is handed to auto_capture_callback (or taken with capture_card_image_only) and read elsewhere.
+Its settings object only needs get(key, default) and set(key, value): Settings here,
+ServerSettings on a station (kept by the server).
 """
 
 import cv2
@@ -78,7 +85,7 @@ def focus_sweep(set_focus, measure_sharpness, low, high, coarse_step=50, fine_st
 
 
 class CardScanner:
-    """Handles camera operations and card scanning"""
+    """Handles camera operations and card scanning (see the module description for where it runs)"""
     
     def __init__(self, log_callback=None, settings=None):
         self.log_callback = log_callback

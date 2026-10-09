@@ -153,6 +153,7 @@ class Station:
     # ------------------------------------------------------------------------
 
     def state(self):
+        """What the server shows and decides by (RemoteScanner: REPORTED and SENT names, the camera settings)"""
         s = self.scanner
         return {
             'camera_error': s.camera_error, 'camera_type': s.camera_type,
@@ -189,10 +190,10 @@ class Station:
         last_status = last_preview = 0.0
         last_frame = -1
         while True:
-            time.sleep(0.02)
+            time.sleep(0.02)  # the two intervals below are checked 50 times a second
             scanner = self.scanner
             if scanner is None or not self.connected():
-                continue
+                continue  # still starting, or the server is away: scanning goes on without reports
             now = time.time()
             if now - last_status >= STATUS_INTERVAL:
                 last_status = now
@@ -271,9 +272,13 @@ class Station:
                         files['foil_image'] = (item['foil'].name, item['foil'].read_bytes(), 'image/jpeg')
                     response = session.post(
                         f"{self.server}/api/stations/{self.id}/captures", files=files, headers=headers, timeout=90,
+                        # wait 0: the outcome is shown on the station's page, nobody waits for it here.
+                        # capture_id: this same capture sent again (no answer came) is still one card
                         data={'name': self.name, 'camera': '1', 'mode': item['mode'], 'wait': '0',
                               'capture_id': item['capture_id'], 'foil_is_image': '1' if item['foil_is_image'] else '0'})
                     if response.status_code < 500:
+                        # The server has it - or refuses it for good (a wrong token, an unreadable
+                        # picture): sending it again would change nothing
                         if response.status_code >= 400:
                             logger.error(f"The server refused {item['image'].name}: {response.text[:200]}")
                         break
