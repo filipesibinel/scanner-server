@@ -1660,7 +1660,7 @@ async function clearInventory() {
     const count = $('inv-cards').textContent;
     const ok = await confirmDialog(camera ? {
         title: `Clear the cards ${cameraName} scanned?`,
-        message: `This deletes the ${count} cards scanned by ${cameraName} that are not in the collection yet, to scan them again. The other cameras' scanned cards and your collection are not touched.`,
+        message: `This deletes the ${count} cards scanned by ${cameraName} that are not in the collection yet, and the cards it has waiting for review, to scan them again. The other cameras' scanned cards and your collection are not touched.`,
         confirmText: `Delete ${cameraName}'s cards`,
         danger: true
     } : {
@@ -1677,7 +1677,7 @@ async function clearInventory() {
         .then(response => response.json())
         .then(data => {
             if (data.success) {
-                notify(camera ? `${cameraName}: ${data.deleted} scanned cards removed`
+                notify(camera ? `${cameraName}: ${data.deleted} scanned cards removed` + (data.reviews ? `, ${data.reviews} from its review queue` : '')
                               : `Scanned cards cleared: ${data.deleted} entries removed`, 'success');
                 inventoryChanged();
             } else {

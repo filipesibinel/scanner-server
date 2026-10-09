@@ -1273,9 +1273,23 @@ def clear_inventory():
 
     try:
         camera = scan_camera() if inventory_area() is scan_inventory else None
-        result = inventory_area().clear_inventory(games.active().id, station=camera)
+        game = games.active()
+        result = inventory_area().clear_inventory(game.id, station=camera)
 
         if result['success']:
+            reviews = 0
+            if camera:
+                # That camera starts over: the cards it has waiting for review go too
+                reviews = review.clear(game.id, camera)
+                with in_desk(desk_for(camera)):
+                    if desk().current_review_id is not None:  # its page had one open
+                        desk().current_review_id = desk().review_sid = desk().current_card_info = None
+                        set_pending_capture(None)
+                        emit_desk('review_item', {'id': None, 'total': 0})
+                    emit_desk('review_queue_update', {'count': 0})
+                    if reviews:
+                        log_to_client(f"Scanned cards cleared: {reviews} card(s) removed from the review queue too",
+                                      level="warning")
             if inventory_area() is scan_inventory:
                 # Every scanner page counts the scanned cards (its camera's, or everyone's)
                 socketio.emit('inventory_updated', {'auto': False, 'cleared': True}, namespace='/')
@@ -1283,6 +1297,7 @@ def clear_inventory():
                 'success': True,
                 'deleted': result['deleted'],
                 'camera': camera,
+                'reviews': reviews,
                 'message': f"Inventory cleared: {result['deleted']} {'cards' if camera else 'entries'} removed"
             })
         else:

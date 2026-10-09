@@ -1014,7 +1014,8 @@ crash in between is finished for that camera only - simulated 2026-10-08: moved 
 other camera's copy still scanned). The Clear button follows the filter too: with a camera
 chosen it deletes only that camera's copies and capture images (`clear_inventory(station=...)`,
 `POST /api/clear_inventory?area=scan&camera=<id>`), to scan its pile again; with "All cameras"
-everything. Its review queue items and capture count stay. An entry edited into another one
+everything. A camera's clear also drops its review queue items (`ReviewQueue.clear`; a review
+open on its page is closed); "All cameras" leaves the review queues alone. The capture count stays. An entry edited into another one
 (location, finish) can lose its camera.
 
 Measured 2026-10-08 with two pages open at once (the laptop's camera and a station uploading

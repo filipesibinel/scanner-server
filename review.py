@@ -94,6 +94,18 @@ class ReviewQueue:
     def image_path(item):
         return REVIEW_DIR / item['file'] if item and item.get('file') else None
 
+    def clear(self, game, station):
+        """Drop every item of one station (clearing that camera's scanned cards); returns how many"""
+        with self._lock:
+            rows = self.conn.execute('SELECT file FROM review_queue WHERE game = ? AND station IS ?',
+                                     (game, station)).fetchall()
+            self.conn.execute('DELETE FROM review_queue WHERE game = ? AND station IS ?', (game, station))
+            self.conn.commit()
+        for row in rows:
+            if row['file']:
+                (REVIEW_DIR / row['file']).unlink(missing_ok=True)
+        return len(rows)
+
     def remove(self, item_id):
         """Resolve an item (added or skipped): delete it and its capture copy"""
         with self._lock:
