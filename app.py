@@ -203,6 +203,8 @@ from cleanup import cleanup_old_images, get_images_stats
 
 # Import scanner
 from scanner import CardScanner
+from remote_scanner import RemoteScanner
+from settings import Settings
 from card_ocr import CardOcr
 from identification import Identification
 from stations import Stations
@@ -233,6 +235,9 @@ stations = None           # stations.Stations: cameras elsewhere that send their
 pending = None            # pending.PendingCaptures: captures in the queues, on disk until settled
 # What became of the stations' last few hundred captures: {(station id, capture number): outcome}
 capture_outcomes = collections.OrderedDict()
+# Captures by the id their sender gave them, so one sent twice (no answer the first time) is
+# one capture: {capture id: (station id, capture number)}
+seen_captures = collections.OrderedDict()
 capture_outcomes_lock = threading.Lock()
 debug_mode_running = Config.DEBUG  # Flask's debug mode as this process was started (main)
 database = None
@@ -520,19 +525,22 @@ def foil_file(image_path):
 
 
 def submit_capture(image_path, image, foil_image, number, game_id, station=None, captured_at=None, on_outcome=None,
-                   foil_path=None, pending_id=None):
+                   foil_path=None, pending_id=None, outcome_key=None, capture_id=None):
     """
     Queue a saved capture to be read (identification.py) and then added or queued for review,
     as when adding automatically. It is on record (pending.py) until it is settled, so a
     restart picks it up again.
     foil_path: the file of foil_image when that is another picture than the card image;
     on_outcome(outcome): called with route_identified's outcome ('seconds' added);
-    pending_id: the capture is on record already (resume_pending)
+    pending_id: the capture is on record already (resume_pending);
+    outcome_key: (uploading station's id, capture number) to remember the outcome under;
+    capture_id: the uploader's own id for the capture (see seen_captures)
     """
     captured_at = captured_at or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     if pending_id is None:
         pending_id = pending.add(game_id, station['id'] if station else None, number, Path(image_path).name,
-                                 Path(foil_path).name if foil_path else None, foil_image is image, captured_at)
+                                 Path(foil_path).name if foil_path else None, foil_image is image, captured_at,
+                                 capture_id=capture_id, sender=outcome_key[0] if outcome_key else None)
     queue_changed(+1)
 
     def identified(card_info, seconds):
@@ -550,15 +558,20 @@ def submit_capture(image_path, image, foil_image, number, game_id, station=None,
             if foil_path:
                 Path(foil_path).unlink(missing_ok=True)
             queue_changed(-1)
-        if station:
-            with capture_outcomes_lock:
-                capture_outcomes[(station['id'], number)] = outcome
-                while len(capture_outcomes) > 500:
-                    capture_outcomes.popitem(last=False)
+        if outcome_key:
+            remember_outcome(outcome_key, outcome)
         if on_outcome:
             on_outcome(outcome)
 
     identification.submit(image, foil_image, game_id, identified)
+
+
+def remember_outcome(key, outcome):
+    """What became of a station's capture: key (station id, capture number); the last 500"""
+    with capture_outcomes_lock:
+        capture_outcomes[key] = outcome
+        while len(capture_outcomes) > 500:
+            capture_outcomes.popitem(last=False)
 
 
 def resume_pending():
@@ -579,8 +592,11 @@ def resume_pending():
         station = None
         if row['station']:  # a station forgotten meanwhile still gets its card in
             station = stations.get(row['station']) or {'id': row['station'], 'name': row['station'], 'location': None}
+        outcome_key = (row['sender'] or row['station'], row['number']) if row['sender'] or row['station'] else None
+        if row['capture_id'] and outcome_key:
+            seen_captures[row['capture_id']] = outcome_key
         submit_capture(image_path, image, foil_image, row['number'], row['game'], station, row['captured_at'],
-                       foil_path=foil_path, pending_id=row['id'])
+                       foil_path=foil_path, pending_id=row['id'], outcome_key=outcome_key)
 
 
 def initialize_components():
@@ -598,7 +614,17 @@ def initialize_components():
 
     # Initialize scanner
     logger.info("Initializing scanner...")
-    scanner = CardScanner(log_callback=log_to_client)
+    stations = Stations()
+    if Config.CAMERA_TYPE.lower() == 'remote':
+        # No camera here: the scanner page shows the one of a station (station_client.py)
+        scanner = RemoteScanner(
+            socketio, Settings(), log_callback=log_to_client, stations=stations,
+            on_captured=lambda number: socketio.emit('auto_capture_triggered', {
+                'counter': number, 'message': f'Auto-capture #{number}'}, namespace='/'),
+            on_auto_capture_changed=lambda enabled: socketio.emit('auto_capture_toggled', {'enabled': enabled},
+                                                                  namespace='/'))
+    else:
+        scanner = CardScanner(log_callback=log_to_client)
     set_auto_add(scanner.settings.get('auto_add', True))  # remembered in data/settings.json
     log_to_client("Scanner initialized", level="info")
 
@@ -619,7 +645,6 @@ def initialize_components():
     scan_inventory = InventoryManager(db_file=SCAN_INVENTORY_FILE, log_callback=log_to_client)
     inventory.finish_interrupted_moves(scan_inventory)  # an "Add to collection" cut short by a crash
     review = ReviewQueue()
-    stations = Stations()
     pending = PendingCaptures()
     deck_store = DeckManager()
     recommend = Recommendations()
@@ -1785,6 +1810,9 @@ def station_capture(station_id):
       foil_image  optional: the perspective-corrected card, for the star/dot foil check
       name        optional: what the station calls itself
       wait        optional: seconds to wait for the outcome (default 30; 0: answer at once)
+      capture_id  optional: the station's own id for this capture - sent again, it is not a new one
+      foil_is_image  optional, '1': image is the perspective-corrected card (no foil_image needed)
+      camera, mode   station_client.py: the scanner page's camera; mode 'review' = show it, don't add
     The card is read (OCR, then the vision AI), and - as when adding automatically - added to
     the scanned cards if its printing is confirmed, else queued for review.
     Answers {'capture': n, 'status': 'added' | 'review' | 'pending', ...}; 202 while pending.
@@ -1799,38 +1827,65 @@ def station_capture(station_id):
     if image is None:
         return jsonify({'success': False, 'message': "No readable picture in 'image'"}), 400
     foil_data, foil_image = decode_upload(request.files.get('foil_image'))
+    if foil_image is None and request.form.get('foil_is_image') == '1':
+        foil_image = image  # the card image is the perspective-corrected card
     try:
         wait = max(0.0, min(float(request.form.get('wait', STATION_CAPTURE_WAIT)), 120.0))
     except ValueError:
         wait = STATION_CAPTURE_WAIT
 
+    # Sent before? (the station got no answer and tries again): the same capture, not a new one
+    capture_id = (request.form.get('capture_id') or '')[:64] or None
+    with capture_outcomes_lock:
+        known = seen_captures.get(capture_id) if capture_id else None
+    if known:
+        return capture_outcome_response(*known)
+
     station = stations.capture(station_id, request.form.get('name'))
     number = station['captures']
+    key = (station_id, number)
+    if capture_id:
+        with capture_outcomes_lock:
+            seen_captures[capture_id] = key
+            while len(seen_captures) > 2000:
+                seen_captures.popitem(last=False)
     image_path = Config.IMAGES_DIR / f"{station_id}_{number}_{int(time.time())}.jpg"
     save_upload(image_path, data, image)
+    game_id = games.active_id()
+
+    # The scanner page's camera (station_client.py) sends its captures like any station, but
+    # they are the page's: its location, its Undo, its card panel
+    is_camera = request.form.get('camera') == '1'
+    if is_camera and request.form.get('mode') == 'review':
+        # A manual capture, or auto scanning that waits for Add / Skip: read now and shown
+        queue_changed(+1)
+        try:
+            card_info = identification.identify(image, foil_image)
+            outcome = announce_and_route(image_path, card_info, number, game_id)
+        except Exception as e:
+            logger.exception(f"Capture {image_path.name} failed: {e}")
+            log_to_client(f"Capture error: {e}", level="error")
+            scanner.card_under_review = False  # don't hold the next capture back
+            outcome = {'status': 'error', 'message': str(e)}
+        finally:
+            queue_changed(-1)
+        remember_outcome(key, outcome)
+        return capture_outcome_response(*key)
+
     foil_path = None
-    if foil_image is not None:
+    if foil_image is not None and foil_image is not image:
         foil_path = foil_file(image_path)
         save_upload(foil_path, foil_data, foil_image)
 
-    outcome, done = {}, threading.Event()
-
-    def settled(result):
-        outcome.update(result)
-        done.set()
-
-    submit_capture(image_path, image, foil_image, number, games.active_id(), station, on_outcome=settled,
-                   foil_path=foil_path)
-    if not done.wait(wait):
-        return jsonify({'success': True, 'capture': number, 'status': 'pending'}), 202
-    return jsonify({'success': outcome.get('status') != 'error', 'capture': number, **outcome})
+    done = threading.Event()
+    submit_capture(image_path, image, foil_image, number, game_id, None if is_camera else station,
+                   on_outcome=lambda _outcome: done.set(), foil_path=foil_path, outcome_key=key, capture_id=capture_id)
+    done.wait(wait)
+    return capture_outcome_response(*key)
 
 
-@app.route('/api/stations/<station_id>/captures/<int:number>')
-def station_capture_outcome(station_id, number):
-    """What became of a capture that was still pending when its upload was answered"""
-    if not station_token_ok():
-        return jsonify({'success': False, 'message': 'Wrong or missing station token'}), 401
+def capture_outcome_response(station_id, number):
+    """What became of a station's capture: its outcome, 202 while it is being read, or 404"""
     with capture_outcomes_lock:
         outcome = capture_outcomes.get((station_id, number))
     if outcome is not None:
@@ -1838,6 +1893,14 @@ def station_capture_outcome(station_id, number):
     if pending.has(station_id, number):
         return jsonify({'success': True, 'capture': number, 'status': 'pending'}), 202
     return jsonify({'success': False, 'message': 'No such capture (outcomes are kept for the last few hundred)'}), 404
+
+
+@app.route('/api/stations/<station_id>/captures/<int:number>')
+def station_capture_outcome(station_id, number):
+    """What became of a capture that was still pending when its upload was answered"""
+    if not station_token_ok():
+        return jsonify({'success': False, 'message': 'Wrong or missing station token'}), 401
+    return capture_outcome_response(station_id, number)
 
 
 def undo_station_add(station):
@@ -2020,6 +2083,10 @@ def handle_capture(data):
     try:
         # Manual capture works regardless of detection state
         # If no card detected, captures full frame
+        if isinstance(scanner, RemoteScanner):
+            scanner.request_capture()  # the station takes the picture and sends it (station_capture)
+            return
+
         game_id = games.active_id()
         image_path, card_image_rgb, foil_image = scanner.capture_card_image_only(card_number)
 
@@ -2321,7 +2388,11 @@ def handle_toggle_detection(data):
         return
 
     enabled = data.get('enabled', True)
-    scanner.set_detection_enabled(enabled)
+    try:
+        scanner.set_detection_enabled(enabled)
+    except ValueError as e:  # the camera station did not answer
+        emit('error', {'message': str(e)})
+        return
     emit('detection_toggled', {'enabled': enabled})
     logger.info(f"Detection toggled: {enabled}")
     log_to_client(f"Card detection {('enabled' if enabled else 'disabled')}", level="info")
@@ -2608,7 +2679,10 @@ def handle_set_fixed_area(data):
         return
     area = data.get('area')
     if data.get('use_detected'):
-        area = scanner.detected_area()
+        try:
+            area = scanner.detected_area()
+        except ValueError:
+            area = None
         if area is None:
             emit('error', {'message': 'No card detected - put a card in the box, or draw the area'})
             return
@@ -2627,7 +2701,11 @@ def handle_set_fixed_area(data):
     if enabled and area is None and scanner.fixed_area is None:
         emit('error', {'message': 'Draw the capture area first'})
         return
-    state = scanner.set_fixed_area(enabled=enabled, area=area)
+    try:
+        state = scanner.set_fixed_area(enabled=enabled, area=area)
+    except ValueError as e:  # the camera station did not answer
+        emit('error', {'message': str(e)})
+        return
     logger.info(f"Fixed area: {'on' if state['enabled'] else 'off'} {state['area']}")
     socketio.emit('fixed_area_updated', state)
 

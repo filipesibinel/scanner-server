@@ -48,6 +48,9 @@ Design choices:
 | `app.py` | Flask + Socket.IO server: routes, events, capture orchestration, station captures |
 | `identification.py` | Reading a card, shared by every camera: light-ocr, the vision AI, and the queue in front of each (`Identification`) |
 | `stations.py` | Stations: cameras elsewhere that capture cards themselves and upload them (`data/stations.json`) |
+| `station_client.py` | The camera station program: `CardScanner` next to the camera, connected to the server (runs on the camera's machine, not on the server) |
+| `remote_scanner.py` | `RemoteScanner`: what the server holds instead of a `CardScanner` when the camera is at a station; the `/station` Socket.IO namespace |
+| `pending.py` | Captures in the queues, on disk until settled (`data/pending_captures.db`) |
 | `backups.py` | Backups of the collection, the scanned cards and the decks, made and restored on the collection page |
 | `scanner.py` | Camera (USB via OpenCV/V4L2 or Pi camera), capture thread, detection state, stability, auto-capture |
 | `object_detector.py` | Outline detection (`find_card_outline`), perspective warp (`warp_card`) |
@@ -870,6 +873,8 @@ The server needs no camera of its own.
 | `foil_image` | Optional: the perspective-corrected card, for the ★/• foil check by the AI |
 | `name` | Optional: what the station calls itself (used until it is renamed on the server) |
 | `wait` | Optional: seconds to wait for the outcome (default 30, at most 120; 0 answers at once) |
+| `capture_id` | Optional: the station's own id for this capture (up to 64 characters). Sent again - no answer came the first time - it is the same capture, answered with its outcome, not a second card |
+| `foil_is_image` | Optional, `1`: `image` is the perspective-corrected card itself, so no `foil_image` is needed |
 
 `<id>` is chosen and kept by the station (1-40 letters, digits, `-`, `_`); a new id creates the
 station (`stations.py`, `data/stations.json`: name, location, capture count, last seen). The
@@ -917,12 +922,57 @@ record. Measured 2026-10-08: container killed (`docker kill`) with 110 captures 
 after the restart all were added, 120 cards for 119 accepted uploads. It is "at least once":
 the extra card is an upload recorded just before the kill whose answer never reached the
 sender, or a card added just before the kill and not yet taken off the record (then added
-again). A station that got no answer and sends the picture again adds the card twice too.
+again). A station that got no answer and sends the picture again adds the card twice too -
+unless it sends a `capture_id`.
 
 Measured 2026-10-08 (server in Docker, OCR on an RTX 4070 Ti SUPER, a laptop on Wi-Fi sending
 recorded captures): one station at a card every 2.5 s - 30 of 30 added, 29 by OCR in 0.34 s
 (median, upload included) and 1 by the AI in 1.2 s; four stations at a card every 0.5 s each
 (7.8 cards/s) - 100 of 100 added, OCR median 0.48 s, worst 1.0 s.
+
+### The scanner page's camera as a station
+
+With `camera.type: remote` (`SCANNER_CAMERA=remote`; the Docker image's default) the server
+opens no camera. `station_client.py` runs the real `CardScanner` next to the camera - capture
+thread, outline detection, stillness, new-card rules, focus sweeps and probes, all unchanged
+and at camera speed - and `app.py` holds a `RemoteScanner` (`remote_scanner.py`) in its place:
+the same attributes and methods, so the page's handlers don't know the difference.
+
+Socket.IO namespace `/station`, opened by the client (`auth`: id, name, token):
+
+| Client → server | |
+|---|---|
+| `hello` | Answered with the camera's saved settings (`CAMERA_SETTINGS`: focus position, rotation, focus check interval, fixed area, debug trace) and the attributes the server decides (`DECIDED`: add automatically, stability frames, capture delay). The client creates its `CardScanner` with them; after a reconnect only the decided attributes are applied again |
+| `status` (every 0.2 s) | The scanner's state and `get_detection_status()`; the answer says whether the preview is being watched |
+| `preview` | The annotated live view as JPEG (`get_stream_jpeg`), at most ~12 a second and only while a page shows `/video_feed` (measured: 12 fps, 66 KB a frame over Wi-Fi) |
+| `setting` | A camera setting the scanner changed (a focus sweep's result, ...): saved in the server's `settings.json` - the station keeps nothing |
+| `log`, `captured` | The scanner's log lines; the capture beep (`auto_capture_triggered` to the pages) |
+
+| Server → client | |
+|---|---|
+| `command` | A `CardScanner` method (`METHODS`: rotation, fixed area, focus, detection, `capture`), waited for (6 s); the answer carries the result or the error text (raised as `ValueError`) and the state after it |
+| `set` | Attributes: `card_under_review`, `auto_capture_enabled`, and the decided ones when they change |
+
+Captures are uploads like any station's (`station_capture`), with `camera=1` - they are the
+page's own cards (its location, its Undo, its card panel) - and `mode`: `auto` goes through
+the queues and is added or queued for review; `review` (a manual capture, or auto scanning
+that waits for Add / Skip) is read at once and shown on the page, and the client holds its next
+auto-capture until the page says Add or Skip (`card_under_review`). Every upload carries a
+`capture_id`; one sent again because no answer came (server restarting, Wi-Fi) is the same
+capture (`seen_captures`, kept with the pending record across a restart). The client sends in
+order from a queue, retries until the server has the image, then deletes its file.
+
+The client's own state decides `auto_capture_enabled`: a connection that drops and comes back
+goes on scanning; a client that restarts has it off, and the pages are told
+(`auto_capture_toggled`). Only one camera station at a time: a second one connecting replaces
+the first.
+
+Measured 2026-10-08 (laptop with the Anker C200 on Wi-Fi, server in Docker): manual capture to
+card on the page 2.7 s when the AI had to read it, auto-capture to added 0.4 s (OCR); a focus
+sweep asked from the page, its result saved on the server; fixed area, rotation, focus check
+interval and detection switched from the page; server stopped for 12 s with a capture waiting -
+sent when it was back, one card; the same `capture_id` twice - one card; the client reconnects
+by itself ~5 s after a server restart. Client load: ~30% of one core (Ryzen 5 7235HS), 155 MB.
 
 ## Web interface
 

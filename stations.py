@@ -80,6 +80,14 @@ class Stations:
             self._save()
             return self._public(station_id)
 
+    def seen(self, station_id, name=None):
+        """A station connected (remote_scanner.py): created if new, its count untouched"""
+        with self._lock:
+            station = self.capture(station_id, name)
+            self._stations[station_id]['captures'] -= 1
+            self._save()
+            return self._public(station_id)
+
     def update(self, station_id, name=None, location=None):
         """Rename a station / set where its cards are put (location None: as the scanner page's)"""
         with self._lock:

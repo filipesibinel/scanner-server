@@ -1,0 +1,15 @@
+# Camera station (station_client.py) dependencies (Python 3.10+) - the server needs requirements.txt
+
+# Camera, card detection
+numpy
+opencv-python-headless>=4.10
+
+# Talking to the server: Socket.IO (status, preview, commands) and HTTP (captured cards)
+python-socketio[client]>=5.8
+websocket-client
+requests
+
+# config.yaml (camera index, resolution, capture thresholds)
+pyyaml>=6.0
+
+# Raspberry Pi Camera (optional - install via apt on the Pi: python3-picamera2)

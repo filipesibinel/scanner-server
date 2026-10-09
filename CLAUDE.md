@@ -30,6 +30,7 @@ venv/bin/python app.py                    # run (http://localhost:5000)
 venv/bin/python setup_database.py         # (re)download the Scryfall card database
 venv/bin/python cleanup.py --stats        # scanned images; --days N / --dry-run / --all
 docker compose up -d --build              # the server as a container (data/ and scanned_cards/ are volumes)
+venv/bin/python station_client.py --server http://<server>:5000   # the camera, on the machine it is plugged into
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build   # ... with OCR on an NVIDIA GPU
 ```
 
@@ -55,6 +56,7 @@ with a fake camera (patch `detect_camera_type` / `_initialize_usb_camera`).
 | Card games (the active one drives search, finishes, exports / imports per site: `export_formats`, `import_rows`) | `games/`: `base.Game`, `mtg.Magic`, `games.active()`; plan in `MULTI_GAME_IMPLEMENTATION_PLAN.md` |
 | Card data updates (staged import, update check) | `database.py`: `replace_table`, `card_data_info`; `Game.check_for_update`; `app.py`: `start_card_data_update`, `check_card_data_updates` |
 | Card search / printing match / confidence (Magic) | `database.py`: `search_card_exact`, `search_card`, `find_printings`, `CONFIRMED_MATCHES`, `search_key`, `names_match` |
+| The scanner page's camera at a station (server has none: `camera.type: remote`) | `station_client.py`: `Station` (runs `CardScanner`; `hello`, `report_loop`, `on_command`, `auto_captured`, `upload_loop`); `remote_scanner.py`: `RemoteScanner` (stands in for `CardScanner` in `app.py`; `METHODS`, `DECIDED`, `SENT`, `CAMERA_SETTINGS`, the `/station` namespace); `app.py`: `station_capture` (`camera`, `mode`, `capture_id`) |
 | Stations (cameras elsewhere that upload their captures) | `stations.py`: `Stations` (`data/stations.json`); `app.py`: `station_capture`, `station_capture_outcome`, `station_undo`, `station_list`, `station_item`; `scanner.js`: `loadStations`, `renderStations` (Settings) |
 | Captures in the queues kept across a restart | `pending.py`: `PendingCaptures` (`data/pending_captures.db`); `app.py`: `submit_capture` (every queued capture goes through it), `resume_pending` |
 | Capture orchestration, auto-add gate, events | `app.py`: `handle_auto_capture` (in `initialize_components`), `announce_and_route`, `route_identified` (returns the outcome), `search_and_emit_card`, `queue_changed`, `set_auto_add`; automatic adds on the server (`add_automatically`, `Game.suggested_finish`) |
@@ -135,6 +137,15 @@ with a fake camera (patch `detect_camera_type` / `_initialize_usb_camera`).
   from scanning code paths.
 - **New Socket.IO events** need a handler in `app.py` and in `static/js/scanner.js`, and a line
   in PROGRAM_DOCUMENTATION.md.
+- **Two programs now**: `app.py` is the server; `scanner.py` / `object_detector.py` run in
+  `station_client.py` on the camera's machine (they still run inside `app.py` with a local
+  camera, `camera.type` other than `remote`). Anything `app.py` reads or calls on `scanner`
+  must also exist on `RemoteScanner` - a new attribute goes into the client's `state()` and
+  one of `DECIDED` / `SENT` / `REPORTED`, a new method into `METHODS` on both sides. The client
+  must not import server modules (`database`, `inventory`, `identification`, Flask).
+- **Camera settings live on the server**: the client's `CardScanner` gets a `ServerSettings`
+  (get / set) filled by `hello`; a new per-camera setting key must be added to
+  `CAMERA_SETTINGS` or it is neither sent nor saved.
 - **Docker image** (`Dockerfile`, target `server`; INSTALL.md "Server in Docker"): light-ocr's
   native library needs glibc 2.38+ (Debian 13 base images - on Debian 12 OCR silently fails to
   start), and NVIDIA's Vulkan driver needs the X11 / GLVND libraries plus

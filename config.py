@@ -29,7 +29,8 @@ class Config:
     SCRYFALL_BULK_URL = config.get('api', 'scryfall_bulk', default="https://api.scryfall.com/bulk-data/default-cards")
 
     # Camera settings
-    CAMERA_TYPE = config.get('camera', 'type', default='auto')
+    # 'remote': the camera is at a station (station_client.py) - also from the environment
+    CAMERA_TYPE = os.getenv('SCANNER_CAMERA') or config.get('camera', 'type', default='auto')
     USB_CAMERA_INDEX = config.get('camera', 'usb_index', default=0)
     CAMERA_RESOLUTION = tuple(config.get('camera', 'resolution', default=[2560, 1440]))
     CAMERA_PREVIEW_RESOLUTION = tuple(config.get('camera', 'preview_resolution', default=[640, 480]))

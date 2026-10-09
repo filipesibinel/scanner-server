@@ -78,6 +78,32 @@ like Ctrl+C).
   RTX 4070 Ti SUPER: 0.10 s per card, against 0.67 s on 4 cores of a Ryzen 7 7800X3D.
 - **Updating**: `git pull`, then the same `up -d --build` command.
 
+## Camera station
+
+The camera runs on another machine than the server - any Linux PC or laptop with the USB
+webcam - as `station_client.py`. It finds, captures and focuses on the cards (the same code as
+the scanner always used) and sends each captured card to the server; the server's scanner page
+shows its live view and controls it. The server must run with `camera.type: remote` (the
+Docker image does: `SCANNER_CAMERA=remote`).
+
+```bash
+git clone <this repository> scanner-server && cd scanner-server
+python3 -m venv venv && venv/bin/pip install -r requirements-client.txt
+sudo apt install v4l-utils           # v4l2-ctl: focus control (pacman -S v4l-utils, ...)
+venv/bin/python station_client.py --server http://<server>:5000
+```
+
+- **Which camera**: `camera.usb_index` in `config.yaml` (`v4l2-ctl --list-devices`).
+- **Options**: `--id` (default: the machine's name), `--name` (shown on the server), `--token`
+  (when the server has a station token) - or `SCANNER_SERVER`, `SCANNER_STATION_ID`,
+  `SCANNER_STATION_NAME`, `SCANNER_STATION_TOKEN`.
+- **Nothing is kept on the station**: focus position, rotation and fixed area are saved on the
+  server; a captured image is deleted once the server has it.
+- **Server or network down**: the station keeps scanning, and the captures wait and are sent
+  when the server is back. Without a server at startup it waits for one (the camera's settings
+  come from there).
+- One camera station at a time is the scanner page's camera; a second one connecting takes over.
+
 ## What the script does
 
 Each step is skipped when it's already done, so it's safe to run again at any time:

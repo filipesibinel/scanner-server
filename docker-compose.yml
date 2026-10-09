@@ -21,6 +21,7 @@ services:
       - ./scanned_cards:/app/scanned_cards  # captured card images
       - /etc/localtime:/etc/localtime:ro    # log times and the daily backup follow the host's clock
     environment:
+      SCANNER_CAMERA: remote  # the camera is at a station (station_client.py), not in the container
       # Ollama on the machine running Docker (must listen on more than 127.0.0.1)
       LOCAL_AI_ENDPOINT: ${LOCAL_AI_ENDPOINT:-http://host.docker.internal:11434/v1/chat/completions}
     env_file:

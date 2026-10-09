@@ -31,16 +31,23 @@ class PendingCaptures:
                     image TEXT NOT NULL,        -- file name in scanned_cards/
                     foil_image TEXT,            -- file of the perspective-corrected card, if another one
                     foil_is_image INTEGER,      -- 1: the card image is the perspective-corrected card
-                    captured_at TEXT NOT NULL
+                    captured_at TEXT NOT NULL,
+                    capture_id TEXT,            -- the sender's own id for it: a repeat is not a new capture
+                    sender TEXT                 -- the station that uploaded it (also when station is NULL)
                 )''')
+            columns = {row['name'] for row in self.conn.execute('PRAGMA table_info(pending_captures)')}
+            for column in ('capture_id', 'sender'):
+                if column not in columns:
+                    self.conn.execute(f'ALTER TABLE pending_captures ADD COLUMN {column} TEXT')
             self.conn.commit()
 
-    def add(self, game, station, number, image, foil_image, foil_is_image, captured_at):
+    def add(self, game, station, number, image, foil_image, foil_is_image, captured_at, capture_id=None, sender=None):
         with self._lock:
             pending_id = self.conn.execute(
-                'INSERT INTO pending_captures (game, station, number, image, foil_image, foil_is_image, captured_at) '
-                'VALUES (?, ?, ?, ?, ?, ?, ?)',
-                (game, station, number, image, foil_image, int(bool(foil_is_image)), captured_at)).lastrowid
+                'INSERT INTO pending_captures (game, station, number, image, foil_image, foil_is_image, captured_at, '
+                'capture_id, sender) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (game, station, number, image, foil_image, int(bool(foil_is_image)), captured_at, capture_id,
+                 sender)).lastrowid
             self.conn.commit()
         return pending_id
 
@@ -49,10 +56,10 @@ class PendingCaptures:
             self.conn.execute('DELETE FROM pending_captures WHERE id = ?', (pending_id,))
             self.conn.commit()
 
-    def has(self, station, number):
+    def has(self, sender, number):
         with self._lock:
-            return self.conn.execute('SELECT 1 FROM pending_captures WHERE station IS ? AND number = ?',
-                                     (station, number)).fetchone() is not None
+            return self.conn.execute('SELECT 1 FROM pending_captures WHERE COALESCE(sender, station) IS ? AND number = ?',
+                                     (sender, number)).fetchone() is not None
 
     def all(self):
         """Oldest first"""
