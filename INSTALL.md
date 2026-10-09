@@ -49,7 +49,7 @@ Linux machine with Docker - no camera needed there. Files: `Dockerfile` (target 
 `docker-compose.yml`, `docker-compose.gpu.yml`, `scripts/docker-entrypoint.sh`.
 
 ```bash
-git clone <this repository> scanner-server && cd scanner-server
+git clone https://github.com/filipesibinel/scanner-server.git && cd scanner-server
 mkdir -p data scanned_cards        # before the first start, so they belong to you, not root
 docker compose up -d --build
 docker compose logs -f             # the first start downloads the card database (a few minutes)
@@ -87,7 +87,7 @@ shows its live view and controls it. The server must run with `camera.type: remo
 Docker image does: `SCANNER_CAMERA=remote`).
 
 ```bash
-git clone <this repository> scanner-server && cd scanner-server
+git clone https://github.com/filipesibinel/scanner-server.git && cd scanner-server
 python3 -m venv venv && venv/bin/pip install -r requirements-client.txt
 sudo apt install v4l-utils           # v4l2-ctl: focus control (pacman -S v4l-utils, ...)
 venv/bin/python station_client.py --server http://<server>:5000
