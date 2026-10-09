@@ -1047,8 +1047,16 @@ managers' locks. The interval and how many are kept are set in the drawer
 `backup_keep`, 1-60, in `data/settings.json`; default every day, the last 7); older ones are
 deleted when a new one is made, not when the number is lowered. A failure is logged and does
 not stop the app. Backups made by hand are never deleted automatically. They are in
-`data/backups/`, on the same disk as the data: against a lost disk, copy that folder elsewhere
-(`scripts/backup.sh` archives everything). Covered by `tests/test_ownership.py`
+`data/backups/`, on the same disk as the data: against a lost disk, download a backup - the
+arrow beside it, `GET /api/backups/<id>/download`, `backups.archive`: a zip of its folder
+(`<id>/backup.db`, `<id>/captures/`), packed into a temporary file. **Upload a backup
+file** (`POST /api/backups/upload`, `backups.add_archive`) takes such a zip in again, from this
+server or another: it only joins the list (marked `uploaded`, kept like one made by hand) and is
+restored like any other. The file is not trusted: exactly one backup folder, `backup.db` and
+captures with plain names, at most 2 GB unpacked (counted while unpacking, not as the file
+claims), a `backup.db` whose `info` and tables read; a backup of the same time already there is
+refused. It is unpacked into a `.tmp` folder and moved into place.
+(`scripts/backup.sh` archives everything.) Covered by `tests/test_ownership.py`
 (`ScheduledBackups`); the ten-minute timer itself and the drawer's controls were not tested.
 
 **Restore** (`POST /api/backups/<id>/restore`, `backups.restore`) first makes an automatic

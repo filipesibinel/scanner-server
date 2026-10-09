@@ -7,7 +7,7 @@
     <title>Collection - Card Scanner</title>
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=43">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/collection.css') }}?v=13">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/collection.css') }}?v=15">
 </head>
 <body>
     {% include '_icons.html' %}
@@ -362,10 +362,15 @@
                         <label for="backup-keep">keep the last</label>
                         <input type="number" id="backup-keep" class="text-input" min="1" max="60" value="7">
                     </div>
-                    <div class="hint">Made while the app runs, and only when something changed since the last backup. Older automatic ones are cleared away when a new one is made; the ones you make stay until you delete them.</div>
+                    <div class="hint">Made while the app runs, and only when something changed since the last backup. Older automatic ones are cleared away when a new one is made; the ones you make stay until you delete them. Backups are kept on the server's own disk: download one (the arrow beside it) to have a copy elsewhere.</div>
                     <div class="model-row backup-new">
                         <input type="text" id="backup-note" class="text-input" maxlength="80" placeholder="Note (optional)" autocomplete="off">
                         <button class="btn btn-primary" id="backup-create">Back up now</button>
+                    </div>
+                    <div class="backup-upload">
+                        <button class="btn btn-small" id="backup-upload">Upload a backup file</button>
+                        <input type="file" id="backup-upload-input" accept=".zip,application/zip" style="display: none;">
+                        <span class="hint">A zip downloaded here: it joins the list, to be restored when you choose</span>
                     </div>
                     <div id="backup-list" class="backup-list"></div>
                 </div>
@@ -384,6 +389,6 @@
     {% include '_dialogs.html' %}
 
     <script src="{{ url_for('static', filename='js/common.js') }}?v=16"></script>
-    <script src="{{ url_for('static', filename='js/collection.js') }}?v=27"></script>
+    <script src="{{ url_for('static', filename='js/collection.js') }}?v=29"></script>
 </body>
 </html>

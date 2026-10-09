@@ -34,6 +34,7 @@ from pathlib import Path
 import sys
 import time
 import logging
+import tempfile
 import threading
 from logging.handlers import RotatingFileHandler
 
@@ -1225,6 +1226,40 @@ def restore_backup(backup_id):
     # Every open page shows the restored cards
     socketio.emit('inventory_updated', {'auto': False, 'stats': scan_inventory.get_stats(games.active().id)}, namespace='/')
     return jsonify({'success': True, **result, 'backups': backups.list_backups()})
+
+
+@app.route('/api/backups/upload', methods=['POST'])
+def upload_backup():
+    """Add a downloaded backup to the list again (multipart: file) - it is not restored by this"""
+    file = request.files.get('file')
+    if not file:
+        return jsonify({'success': False, 'error': 'No file uploaded'}), 400
+    try:
+        added = backups.add_archive(file.stream)
+    except backups.BackupError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Taking in an uploaded backup failed: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': f'The backup could not be added: {e}'}), 500
+    return jsonify({'success': True, 'backup': added, 'backups': backups.list_backups()})
+
+
+@app.route('/api/backups/<backup_id>/download')
+def download_backup(backup_id):
+    """A backup as one zip file (its folder of data/backups/, to keep somewhere else)"""
+    packed = tempfile.TemporaryFile()  # on disk: a backup with its captures is ~100 MB
+    try:
+        name = backups.archive(backup_id, packed)
+    except backups.BackupError as e:
+        packed.close()
+        return jsonify({'success': False, 'error': str(e)}), 404
+    except Exception as e:
+        packed.close()
+        logger.error(f"Packing backup {backup_id} failed: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': f'The backup could not be packed: {e}'}), 500
+    packed.seek(0)
+    logger.info(f"Backup {backup_id} downloaded")
+    return send_file(packed, mimetype='application/zip', as_attachment=True, download_name=name)
 
 
 @app.route('/api/backups/<backup_id>', methods=['DELETE'])

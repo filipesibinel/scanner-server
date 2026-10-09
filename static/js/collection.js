@@ -1307,11 +1307,12 @@ function renderBackups(backups) {
     $('backup-list').innerHTML = backups.map(backup => `
         <div class="backup-row" data-backup="${escapeHtml(backup.id)}" data-created="${escapeHtml(backup.created.slice(0, 16))}">
             <div>
-                <div class="idea-name">${escapeHtml(backup.created.slice(0, 16))}${backup.automatic || backup.daily ? ' <span class="backup-auto">automatic</span>' : ''}</div>
+                <div class="idea-name">${escapeHtml(backup.created.slice(0, 16))}${backup.automatic || backup.daily ? ' <span class="backup-auto">automatic</span>' : backup.uploaded ? ' <span class="backup-auto">uploaded</span>' : ''}</div>
                 ${backup.note ? `<div class="idea-meta">${escapeHtml(backup.note)}</div>` : ''}
                 <div class="idea-meta">${plural(backup.cards, 'card')} in the collection · ${backup.scanned} scanned · ${plural(backup.decks, 'deck')}</div>
             </div>
             <button class="btn btn-small" data-backup-action="restore">Restore</button>
+            <a class="mini-btn" href="/api/backups/${encodeURIComponent(backup.id)}/download" download title="Download this backup as a zip file, to keep a copy elsewhere"><svg class="icon"><use href="#i-download"/></svg></a>
             <button class="mini-btn" data-backup-action="delete" title="Delete this backup"><svg class="icon"><use href="#i-trash"/></svg></button>
         </div>`).join('') || '<div class="hint">No backups yet.</div>';
 }
@@ -1325,6 +1326,21 @@ async function createBackup() {
     $('backup-note').value = '';
     renderBackups(data.backups);
     notify(`Backup made: ${plural(data.backup.cards, 'card')}, ${data.backup.scanned} scanned, ${plural(data.backup.decks, 'deck')}`, 'success');
+}
+
+async function uploadBackup(file) {
+    // A backup downloaded earlier joins the list; restoring it is a separate step
+    const button = $('backup-upload');
+    button.disabled = true;
+    button.textContent = 'Uploading...';
+    const form = new FormData();
+    form.append('file', file);
+    const data = await api('/api/backups/upload', {method: 'POST', body: form});
+    button.disabled = false;
+    button.textContent = 'Upload a backup file';
+    if (!data) return;
+    renderBackups(data.backups);
+    notify(`Backup of ${data.backup.created.slice(0, 16)} added to the list: ${plural(data.backup.cards, 'card')}, ${plural(data.backup.decks, 'deck')}`, 'success');
 }
 
 async function backupAction(row, action) {
@@ -1620,6 +1636,11 @@ function bindEvents() {
     // Settings drawer (backups); /collection#settings opens it (the scanner's settings link here)
     $('settings-close').addEventListener('click', closeSettings);
     $('backup-create').addEventListener('click', createBackup);
+    $('backup-upload').addEventListener('click', () => $('backup-upload-input').click());
+    $('backup-upload-input').addEventListener('change', event => {
+        if (event.target.files[0]) uploadBackup(event.target.files[0]);
+        event.target.value = '';  // the same file can be chosen again
+    });
     $('backup-every').addEventListener('change', event => saveBackupSchedule({every_hours: parseInt(event.target.value)}));
     $('backup-keep').addEventListener('change', event => saveBackupSchedule({keep: parseInt(event.target.value) || 1}));
     $('backup-note').addEventListener('keydown', event => { if (event.key === 'Enter') createBackup(); });

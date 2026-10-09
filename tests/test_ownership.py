@@ -188,6 +188,94 @@ class Backups(TemporaryData):
 
 
 
+class DownloadedBackups(TemporaryData):
+    def test_a_packed_backup_is_a_backup_again_when_unpacked(self):
+        import io, zipfile
+        self.add('desk-a')
+        backup_id = self.backup(note='to keep elsewhere')
+        packed = io.BytesIO()
+        self.assertEqual(backups.archive(backup_id, packed), f'scanner-backup-{backup_id}.zip')
+        names = zipfile.ZipFile(packed).namelist()
+        self.assertIn(f'{backup_id}/backup.db', names)
+        self.assertEqual(len([name for name in names if name.startswith(f'{backup_id}/captures/')]), 1)
+        backups.delete(backup_id)
+        self.scan.clear_inventory(GAME)
+        zipfile.ZipFile(packed).extractall(backups.BACKUPS_DIR)
+        self.assertEqual([item['note'] for item in backups.list_backups()], ['to keep elsewhere'])
+        self.restore(backup_id)
+        self.assertEqual(self.total('desk-a'), 1)
+
+    def packed(self, backup_id):
+        import io
+        packed = io.BytesIO()
+        backups.archive(backup_id, packed)
+        return packed
+
+    def test_an_uploaded_backup_joins_the_list(self):
+        self.add('desk-a')
+        backup_id = self.backup(note='to keep elsewhere', daily=True)
+        packed = self.packed(backup_id)
+        with self.assertRaises(backups.BackupError):              # it is here already
+            backups.add_archive(packed)
+        backups.delete(backup_id)
+        self.scan.clear_inventory(GAME)
+        added = backups.add_archive(packed)
+        self.assertEqual((added['id'], added['scanned'], added['daily'], added['uploaded']), (backup_id, 1, False, True))
+        self.assertEqual([item['id'] for item in backups.list_backups()], [backup_id])
+        self.restore(backup_id)
+        self.assertEqual(self.total('desk-a'), 1)
+        self.assertEqual(len(list(inv.CAPTURES_DIR.glob('*.jpg'))), 1)
+
+    def test_files_that_are_not_a_backup_are_refused(self):
+        import io, zipfile
+        self.add('desk-a')
+        backup_id = self.backup()
+        good = zipfile.ZipFile(self.packed(backup_id))
+        database = good.read(f'{backup_id}/backup.db')
+        backups.delete(backup_id)
+        other = '2020-01-01_00-00-00'
+
+        def made(files):
+            packed = io.BytesIO()
+            with zipfile.ZipFile(packed, 'w') as zipped:
+                for name, data in files.items():
+                    zipped.writestr(name, data)
+            return packed
+
+        bad = [io.BytesIO(b'not a zip'), made({}), made({'backup.db': database}),
+               made({f'{backup_id}/backup.db': b'not a database'}),
+               made({f'{backup_id}/backup.db': database, f'{backup_id}/captures/../../evil.jpg': b'x'}),
+               made({f'{backup_id}/backup.db': database, f'{backup_id}/captures/sub/a.jpg': b'x'}),
+               made({f'{backup_id}/backup.db': database, f'{backup_id}/run.sh': b'x'}),
+               made({f'{backup_id}/backup.db': database, '../evil.txt': b'x'}),
+               made({f'{backup_id}/backup.db': database, f'{other}/backup.db': database}),
+               made({f'../{backup_id}/backup.db': database})]
+        for packed in bad:
+            with self.assertRaises(backups.BackupError):
+                backups.add_archive(packed)
+        self.assertEqual(list(backups.BACKUPS_DIR.iterdir()), [])  # nothing left behind, nothing outside
+        self.assertFalse((self.tmp / 'evil.jpg').exists() or (self.tmp / 'evil.txt').exists())
+
+    def test_an_upload_larger_than_the_limit_is_refused(self):
+        self.add('desk-a')
+        backup_id = self.backup()
+        packed = self.packed(backup_id)
+        backups.delete(backup_id)
+        limit, backups.UPLOAD_MAX_BYTES = backups.UPLOAD_MAX_BYTES, 1000
+        try:
+            with self.assertRaises(backups.BackupError):
+                backups.add_archive(packed)
+        finally:
+            backups.UPLOAD_MAX_BYTES = limit
+        self.assertEqual(list(backups.BACKUPS_DIR.iterdir()), [])
+
+    def test_unknown_backups_are_refused(self):
+        import io
+        for bad in ('../captures', '2026-01-01_00-00-00', ''):
+            with self.assertRaises(backups.BackupError):
+                backups.archive(bad, io.BytesIO())
+
+
 class ScheduledBackups(TemporaryData):
     def scheduled(self, every_hours=24, keep_count=7):
         return backups.create_scheduled(self.collection, self.scan, self.decks, every_hours, keep_count)

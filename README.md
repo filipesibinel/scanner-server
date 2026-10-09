@@ -315,7 +315,7 @@ image).
 |---|---|
 | Update card data and prices | Click the Database counter when it shows a dot, or **Settings → Update card database**. Scanning keeps working during an update |
 | Update the programs | `git pull`, then `docker compose up -d --build` again - on the server and on each station |
-| Back up your cards | Collection page → Settings → **Back up now**; automatic backups are set there too (every hour to every week, or off; default every day, the last 7 kept) |
+| Back up your cards | Collection page → Settings → **Back up now**; automatic backups are set there too (every hour to every week, or off; default every day, the last 7 kept), and each backup can be downloaded as a zip file and uploaded again |
 | Back up everything | Copy the server's `data/` folder while the container is stopped |
 | See what a station is doing | Its page's Activity log; `docker compose -f docker-compose.client.yml logs -f` on the station |
 | Server logs | `data/logs/`: `app.log` (web app, every station's scanner lines), `ai.log` (OCR and AI reads), `database.log`, `scanned_cards.log` (one CSV line per identified card), `ocr.log` |
@@ -425,6 +425,7 @@ those to one camera.
 | `GET /api/export_inventory/<format>` | Download the inventory: `moxfield` (Magic), `csv` (the app's own, every column) |
 | `POST /api/import_inventory` | Import a collection CSV (multipart `file`, `replace_existing`): Moxfield, or the app's own columns |
 | `GET /api/backups`, `POST /api/backups`, `POST /api/backups/schedule` | List the backups (and the automatic backups' settings); make one (JSON: `note`); set how often automatic backups are made and how many are kept (JSON: `every_hours`, `keep`) |
+| `GET /api/backups/<id>/download`, `POST /api/backups/upload` | A backup as a zip file, to keep elsewhere; add such a file to the list again (multipart `file`; nothing is restored by it) |
 | `POST /api/backups/<id>/restore`, `DELETE /api/backups/<id>` | Put the collection, scanned cards and decks back as in a backup (the current state is backed up first); delete a backup |
 | `GET /api/cards/search`, `GET /api/cards/printings?name=` | Deck builder card search; every printing of a card with the copies owned |
 | `GET /api/decks`, `POST /api/decks` | List decks; create one (JSON: `name`, `format`, and optionally `text`, `url`, `precon`, `commander`) |

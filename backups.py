@@ -10,6 +10,8 @@ import os
 import re
 import shutil
 import sqlite3
+import zipfile
+from zlib import error as zlib_error
 from datetime import datetime
 
 from config import Config
@@ -29,6 +31,9 @@ BACKUP_ID = re.compile(r'^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(-\d+)?$')
 # yesterday's entries
 INVENTORY_TABLES = ('inventory', 'inventory_captures', 'inventory_sources')
 DECK_TABLES = ('decks', 'deck_cards')
+CAPTURE_NAME = re.compile(r'^[A-Za-z0-9_-]+\.(jpg|jpeg|png)$')  # a capture inside an uploaded backup
+UPLOAD_MAX_BYTES = 2 * 1024 ** 3  # an uploaded backup, unpacked (a 4,600-card one is ~100 MB)
+UPLOAD_MAX_FILES = 200_000
 KEEP_AUTOMATIC = 5  # backups made before a restore; the ones the user makes are kept until deleted
 # The scheduled ones (create_scheduled; marked 'daily' in their info, whatever the interval):
 # how often, and how many are kept, are settings (backup_every_hours, backup_keep) - these are
@@ -261,6 +266,83 @@ def restore(backup_id, inventory, scan_inventory, deck_store):
         source.close()
     logger.info(f"Restored backup {backup_id} (the state before it: backup {previous['id']})")
     return {'restored': {**info, 'id': backup_id}, 'previous': previous}
+
+
+def archive(backup_id, target):
+    """
+    Write a backup as a zip file into `target` (a file open for writing) - to keep a copy on
+    another machine. Inside is the backup's folder as it is in data/backups/: unpacked there, it
+    is a backup again (listed, restorable). Returns the file name to give it.
+    """
+    folder = _folder(backup_id)
+    with zipfile.ZipFile(target, 'w') as zipped:
+        zipped.write(folder / 'backup.db', f'{backup_id}/backup.db', zipfile.ZIP_DEFLATED)
+        for capture in sorted((folder / 'captures').glob('*')):
+            zipped.write(capture, f'{backup_id}/captures/{capture.name}', zipfile.ZIP_STORED)  # JPEGs don't shrink
+    return f'scanner-backup-{backup_id}.zip'
+
+
+def add_archive(source):
+    """
+    Take in a backup downloaded earlier (archive's zip; `source`: a file open for reading), from
+    this server or another one. It is only added to the list - nothing is restored. The file
+    comes from outside, so nothing in it is trusted: one backup folder, backup.db and captures
+    with plain names only (nothing is written outside its folder), a size limit on what it
+    unpacks to, and a backup.db that reads as one. It counts as made by hand (never cleared
+    away), whatever it was. Returns its info; BackupError says what is wrong with the file.
+    """
+    try:
+        zipped = zipfile.ZipFile(source)
+    except (zipfile.BadZipFile, OSError, ValueError):
+        raise BackupError('This is not a backup file (a zip downloaded here is expected)')
+    with zipped:
+        members = [member for member in zipped.infolist() if not member.is_dir()]
+        ids = {member.filename.split('/')[0] for member in members}
+        backup_id = ids.pop() if len(ids) == 1 else ''
+        if not BACKUP_ID.match(backup_id) or f'{backup_id}/backup.db' not in zipped.namelist():
+            raise BackupError('This is not a backup file (a zip downloaded here is expected)')
+        for member in members:
+            parts = member.filename.split('/')
+            if not (parts == [backup_id, 'backup.db']
+                    or (len(parts) == 3 and parts[1] == 'captures' and CAPTURE_NAME.match(parts[2]))):
+                raise BackupError(f'This is not a backup file: it contains "{member.filename[:80]}"')
+        if len(members) > UPLOAD_MAX_FILES or sum(member.file_size for member in members) > UPLOAD_MAX_BYTES:
+            raise BackupError('This backup file is too large')
+        if (BACKUPS_DIR / backup_id).exists():
+            raise BackupError(f"The backup of {backup_id.replace('_', ' ')} is here already")
+        work = BACKUPS_DIR / f'.{backup_id}.upload.tmp'  # moved into place when complete and checked
+        shutil.rmtree(work, ignore_errors=True)
+        (work / 'captures').mkdir(parents=True)
+        try:
+            left = UPLOAD_MAX_BYTES  # what is really unpacked - the sizes above are only what the file claims
+            for member in members:
+                with zipped.open(member) as packed, open(work.joinpath(*member.filename.split('/')[1:]), 'wb') as out:
+                    while chunk := packed.read(min(1024 * 1024, left + 1)):
+                        left -= len(chunk)
+                        if left < 0:
+                            raise BackupError('This backup file is too large')
+                        out.write(chunk)
+            try:
+                saved = sqlite3.connect(str(work / 'backup.db'))
+                info = json.loads(saved.execute('SELECT value FROM info').fetchone()[0])
+                for prefix, _manager, tables in _parts(None, None, None):
+                    for table in tables[:1] if prefix else tables:  # inventory_sources: newer than some backups
+                        saved.execute(f'SELECT 1 FROM {prefix}{table} LIMIT 1')
+                info = {**info, 'id': backup_id, 'automatic': False, 'daily': False, 'uploaded': True,
+                        'created': str(info['created']), 'note': str(info.get('note') or '')[:80],
+                        **{key: int(info.get(key) or 0) for key in ('cards', 'entries', 'scanned', 'decks')}}
+                saved.execute('UPDATE info SET value = ?', (json.dumps(info),))
+                saved.commit()
+                saved.close()
+            except (sqlite3.Error, TypeError, ValueError, KeyError, AttributeError) as e:
+                raise BackupError(f'This backup file cannot be read ({e})')
+            os.replace(work, BACKUPS_DIR / backup_id)
+        except (zipfile.BadZipFile, EOFError, zlib_error) as e:
+            raise BackupError(f'This backup file is damaged ({e})')
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+    logger.info(f"Backup {backup_id} uploaded: {info['cards']} cards, {info['scanned']} scanned, {info['decks']} decks")
+    return info
 
 
 def delete(backup_id):
