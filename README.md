@@ -246,7 +246,8 @@ cards and to build decks. It works on a phone too.
   much of their usual deck you already have, and the preconstructed decks by how much of each
   you own. These read other sites, so they need internet; if a site doesn't answer, only that
   list is missing.
-- **Preconstructed decks** - **Open as deck** makes a deck list to change as you like; **I own
+- **Preconstructed decks** - **View cards** shows what is in one without saving anything;
+  **Create deck** there makes a deck list to change as you like; **I own
   it** also adds its cards to your inventory (the printings and foils that come in the box).
 - **Added by mistake?** The *Added* filter lists each "Add to collection" with its time. Choose
   one and click **Remove this batch** to take exactly those copies back out.
@@ -434,7 +435,7 @@ those to one camera.
 | `GET /api/decks/<id>/export/<text\|buylist>` | Download the decklist, or the cards not owned |
 | `GET /api/decks/<id>/suggestions`, `GET /api/decks/popular` | EDHREC cards for the deck's commander; public decks on Archidekt / Moxfield |
 | `GET` / `POST /api/decks/ideas/<commanders\|precons\|card>` | "What can I build?" searches: state / start a run / stop it |
-| `GET /api/precons`, `POST /api/precons/<file>/own` | Preconstructed decks; add one's cards to the inventory and open it as a deck |
+| `GET /api/precons`, `GET /api/precons/<file>`, `POST /api/precons/<file>/own` | Preconstructed decks; one's cards with how many of each are owned (nothing saved); add one's cards to the inventory and open it as a deck |
 | `GET /api/inventory/suggested` | The owned cards EDHREC lists for the decks' commanders |
 | `GET /api/ai_provider`, `/api/ai_models`, `/api/local_ai_models`, `/api/ai_credentials`, `/api/prompts` | The AI in use, model lists, masked keys, prompts |
 

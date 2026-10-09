@@ -1861,6 +1861,24 @@ def precon_list():
         return jsonify({'success': False, 'error': str(e)}), 502
 
 
+@app.route('/api/precons/<file_name>')
+def precon_cards(file_name):
+    """A preconstructed deck's cards, to look at: nothing is saved (a deck is made with POST /api/decks, 'precon')"""
+    game = games.active()
+    try:
+        entries = recommend.precon(file_name)
+    except ValueError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Unavailable as e:
+        return jsonify({'success': False, 'error': str(e)}), 502
+    if not entries:
+        return jsonify({'success': False, 'error': 'MTGJSON does not have this deck'}), 404
+    owned = inventory.owned_by_name(game.id)
+    cards = [{'name': entry['name'], 'quantity': entry['quantity'], 'board': entry['board'],
+              'owned': owned.get(search_key(entry['name']), 0)} for entry in entries]
+    return jsonify({'success': True, 'cards': cards})
+
+
 @app.route('/api/precons/<file_name>/own', methods=['POST'])
 def precon_own(file_name):
     """

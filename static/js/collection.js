@@ -755,12 +755,38 @@ function renderPrecons() {
                  <div class="idea-meta">${escapeHtml(item.type)} · ${escapeHtml(item.set)} · ${escapeHtml(item.released.slice(0, 7))}${rank ? ` · ${rank.owned} of ${rank.total} cards owned` : ''}</div></div>
             ${rank ? `<div class="idea-share"><strong>${rank.percent}%</strong><div class="meter" style="width: 70px"><span style="width: ${rank.percent}%"></span></div></div>` : '<span></span>'}
             <div class="idea-actions">
-                <button class="btn btn-small" data-precon="deck" title="A deck list to work on - your inventory is not changed">Open as deck</button>
+                <button class="btn btn-small" data-precon="view" title="See what is in it - nothing is saved">View cards</button>
                 <button class="btn btn-small" data-precon="own" title="Add its cards to your inventory and open it as a deck">I own it</button>
             </div>
         </div>`;
     }).join('') + (more > 0 ? `<div class="hint">${more} more - type to narrow the list</div>` : '')
         || '<div class="hint">No preconstructed deck matches.</div>';
+}
+
+let viewedPrecon = null;     // the precon whose cards are shown
+
+async function viewPrecon(item) {
+    // Only a look: a deck is made by "Create deck" in the window (it once was made by opening)
+    viewedPrecon = item;
+    $('precon-title').textContent = item.name;
+    $('precon-subtitle').textContent = `${item.type} · ${item.set} · ${item.released.slice(0, 7)}`;
+    $('precon-cards').innerHTML = '<div class="hint">Loading the list...</div>';
+    $('precon-create').disabled = $('precon-own').disabled = true;
+    $('precon-modal').classList.add('show');
+    const data = await api(`/api/precons/${encodeURIComponent(item.file)}`);
+    if (viewedPrecon !== item) return;  // another one was opened meanwhile
+    if (!data) return closeModal('precon-modal');
+    const total = totalQuantity(data.cards);
+    const have = data.cards.reduce((sum, card) => sum + Math.min(card.quantity, card.owned), 0);
+    $('precon-subtitle').textContent += ` · ${plural(total, 'card')}, ${have} owned`;
+    const boards = [['commander', 'Commander'], ['main', 'Main deck'], ['side', 'Sideboard']];
+    $('precon-cards').innerHTML = boards.map(([board, label]) => {
+        const cards = data.cards.filter(card => card.board === board).sort((a, b) => byText(a.name, b.name));
+        return cards.length ? `<h4>${label} (${totalQuantity(cards)})</h4>` + cards.map(card => `
+            <div class="precon-card"><span>${card.quantity}×</span><span>${escapeHtml(card.name)}</span>
+                <span class="${card.owned ? '' : 'missing'}">${card.owned ? `${card.owned} owned` : 'not owned'}</span></div>`).join('') : '';
+    }).join('');
+    $('precon-create').disabled = $('precon-own').disabled = false;
 }
 
 async function ownPrecon(item) {
@@ -1528,7 +1554,20 @@ function bindDeckHomeEvents() {
         const item = button && row && precons.find(precon => precon.file === row.dataset.file);
         if (!item) return;
         if (button.dataset.precon === 'own') ownPrecon(item);
-        else createDeck({name: item.name, format: item.format, precon: item.file});
+        else viewPrecon(item);
+    });
+    $('precon-create').addEventListener('click', async () => {
+        const item = viewedPrecon;
+        // A second deck of the same name makes every card of the first count for two decks
+        if (deckList.some(existing => existing.name.toLowerCase() === item.name.toLowerCase())
+            && !await confirmDialog({title: `You already have a deck called ${item.name}`,
+                                     message: 'Create another one with the same name?', confirmText: 'Create another'})) return;
+        closeModal('precon-modal');
+        createDeck({name: item.name, format: item.format, precon: item.file}, 'Deck created');
+    });
+    $('precon-own').addEventListener('click', () => {
+        closeModal('precon-modal');
+        ownPrecon(viewedPrecon);
     });
     $('deck-data-update').addEventListener('click', event => {
         event.target.disabled = true;
@@ -1611,6 +1650,7 @@ const OVERLAYS = [
     ['capture-modal', closeCaptures],
     ['edit-card-modal', closeEditCard],
     ['printing-modal', () => closeModal('printing-modal')],
+    ['precon-modal', () => closeModal('precon-modal')],
     ['settings-drawer', closeSettings],
     ['deck-modal', () => closeModal('deck-modal')],
 ];

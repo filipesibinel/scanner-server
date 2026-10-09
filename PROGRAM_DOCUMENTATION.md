@@ -1158,8 +1158,11 @@ them by the share of each that is owned. `POST` starts a run and replaces one th
 started a search stops it while it runs.
 
 **Preconstructed decks.** The Decks tab lists them from `GET /api/precons` (one cached request)
-with a search; the ranking only adds the share owned. "Open as deck" creates a deck from the
-list. "I own it" (`precon_own`) also adds the cards to the inventory: MTGJSON names the printing
+with a search; the ranking only adds the share owned. "View cards" shows a list
+(`GET /api/precons/<file>`, `precon_cards`: its cards by board, with how many of each are
+owned) and saves nothing - the button was "Open as deck" and created the deck at once, which
+left decks nobody asked for. "Create deck" in that window creates a deck from the list
+(`POST /api/decks`, `precon`), asking first when a deck of that name exists. "I own it" (`precon_own`) also adds the cards to the inventory: MTGJSON names the printing
 in the box (`identifiers.scryfallId`, else set + number, else any printing of the name) and
 whether it is foil, so the entries get the right set, finish (`Game.suggested_finish`) and
 price; they are Near Mint at the location given (the deck's name by default), which is also how

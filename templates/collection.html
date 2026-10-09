@@ -7,7 +7,7 @@
     <title>Collection - Card Scanner</title>
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=43">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/collection.css') }}?v=15">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/collection.css') }}?v=16">
 </head>
 <body>
     {% include '_icons.html' %}
@@ -159,7 +159,7 @@
                             <h3 class="section-title">Preconstructed decks</h3>
                             <button class="btn btn-small" data-ideas="precons" title="Reads every list the first time (about a minute)">Rank by what I own</button>
                         </div>
-                        <div class="hint">Commander and Challenger decks (MTGJSON). <strong>Open as deck</strong> makes a list to work on; <strong>I own it</strong> also adds its cards to your inventory.</div>
+                        <div class="hint">Commander and Challenger decks (MTGJSON). <strong>View cards</strong> shows the list - nothing is saved until you choose <strong>Create deck</strong> there; <strong>I own it</strong> also adds its cards to your inventory.</div>
                         <div class="filter-row">
                             <input type="search" id="precon-search" class="text-input filter-text" placeholder="Deck name, set code or year">
                         </div>
@@ -316,6 +316,27 @@
         </div>
     </div>
 
+    <!-- A preconstructed deck's cards, to look at; a deck is only made with the button -->
+    <div id="precon-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div>
+                    <h2 id="precon-title">Preconstructed deck</h2>
+                    <div class="modal-subtitle" id="precon-subtitle"></div>
+                </div>
+                <span class="close" onclick="closeModal('precon-modal')">&times;</span>
+            </div>
+            <div class="modal-body">
+                <div id="precon-cards" class="precon-cards"></div>
+                <div class="modal-actions">
+                    <button class="btn" onclick="closeModal('precon-modal')">Close</button>
+                    <button class="btn" id="precon-own" title="Add its cards to your inventory and open it as a deck">I own it</button>
+                    <button class="btn btn-primary" id="precon-create" title="Save a copy of this list in your decks, to change as you like - your inventory is not changed">Create deck</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- One value for a bulk action (location, tag, condition, deck) -->
     <div id="value-modal" class="modal">
         <div class="modal-content narrow">
@@ -389,6 +410,6 @@
     {% include '_dialogs.html' %}
 
     <script src="{{ url_for('static', filename='js/common.js') }}?v=17"></script>
-    <script src="{{ url_for('static', filename='js/collection.js') }}?v=29"></script>
+    <script src="{{ url_for('static', filename='js/collection.js') }}?v=30"></script>
 </body>
 </html>
