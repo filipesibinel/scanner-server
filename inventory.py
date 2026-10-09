@@ -860,8 +860,36 @@ class InventoryManager:
         self.log(f"Removed the cards added {added_at}: {cards} cards ({entries} entries)", level="success")
         return {'entries': entries, 'cards': cards}
 
-    def clear_inventory(self, game=None):
-        """Delete every entry (of one game, if given)"""
+    def clear_inventory(self, game=None, station=None):
+        """
+        Delete every entry (of one game, if given). With a station (the scanned cards of one
+        camera): only the copies that station scanned, with its captures - an entry another
+        camera also scanned keeps the other's copies. 'deleted' is then the number of cards.
+        """
+        if station:
+            try:
+                with self._lock:
+                    rows = self._station_rows(game, station)
+                    for row, copies in rows:
+                        self.conn.execute(
+                            'UPDATE inventory SET quantity = quantity - ?, '
+                            'added_quantity = MAX(0, COALESCE(added_quantity, quantity) - ?) WHERE id = ?',
+                            (copies, copies, row['id']))
+                        self._delete_captures('inventory_id = ? AND station = ?', (row['id'], station))
+                    self.conn.execute('DELETE FROM inventory_sources WHERE station = ? AND inventory_id IN '
+                                      '(SELECT id FROM inventory WHERE game = ?)', (station, game))
+                    self.conn.execute('DELETE FROM inventory WHERE game = ? AND quantity <= 0', (game,))
+                    self._drop_orphan_captures()
+                    self._drop_orphan_sources()
+                    self.conn.commit()
+                    self.last_added.pop(station, None)
+                deleted = sum(copies for _, copies in rows)
+                self.log(f"Scanned cards of {station} cleared: {deleted} cards removed", level="success")
+                return {'success': True, 'deleted': deleted}
+            except Exception as e:
+                self.conn.rollback()
+                self.log(f"Failed to clear the scanned cards of {station}: {e}", level="error")
+                return {'success': False, 'error': str(e), 'deleted': 0}
         where, params = ('WHERE game = ?', (game,)) if game else ('', ())
         try:
             with self._lock:

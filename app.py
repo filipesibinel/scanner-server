@@ -1267,18 +1267,23 @@ def import_inventory():
 
 @app.route('/api/clear_inventory', methods=['POST', 'DELETE'])
 def clear_inventory():
-    """Clear all cards from inventory"""
+    """Clear all cards from inventory - of the scanned cards with ?camera=<station id>, only that camera's"""
     if not inventory:
         return jsonify({'error': 'Inventory not initialized'}), 500
 
     try:
-        result = inventory_area().clear_inventory(games.active().id)
+        camera = scan_camera() if inventory_area() is scan_inventory else None
+        result = inventory_area().clear_inventory(games.active().id, station=camera)
 
         if result['success']:
+            if inventory_area() is scan_inventory:
+                # Every scanner page counts the scanned cards (its camera's, or everyone's)
+                socketio.emit('inventory_updated', {'auto': False, 'cleared': True}, namespace='/')
             return jsonify({
                 'success': True,
                 'deleted': result['deleted'],
-                'message': f"Inventory cleared: {result['deleted']} entries removed"
+                'camera': camera,
+                'message': f"Inventory cleared: {result['deleted']} {'cards' if camera else 'entries'} removed"
             })
         else:
             return jsonify({

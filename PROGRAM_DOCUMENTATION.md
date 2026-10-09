@@ -1011,8 +1011,11 @@ the list on its own camera and counts its own cards in the top bar (`scan_stats`
 `POST /api/scan_inventory/to_collection` with `camera` moves only that camera's copies and
 captures (`take_from(station=...)`; the note in `pending_moves` carries the station, so a
 crash in between is finished for that camera only - simulated 2026-10-08: moved once, the
-other camera's copy still scanned). "Clear all" is refused while a camera is chosen. An entry
-edited into another one (location, finish) can lose its camera.
+other camera's copy still scanned). The Clear button follows the filter too: with a camera
+chosen it deletes only that camera's copies and capture images (`clear_inventory(station=...)`,
+`POST /api/clear_inventory?area=scan&camera=<id>`), to scan its pile again; with "All cameras"
+everything. Its review queue items and capture count stay. An entry edited into another one
+(location, finish) can lose its camera.
 
 Measured 2026-10-08 with two pages open at once (the laptop's camera and a station uploading
 captures): each page received only its own station's events, including the OCR / AI log

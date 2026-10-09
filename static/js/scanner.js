@@ -295,6 +295,11 @@ socket.on('inventory_updated', function(data) {
     const added = data.added;
     loadStats();
 
+    if (data.cleared) {
+        // Scanned cards were cleared (a camera's, or all): the counters above are reloaded, nothing was added
+        if (isOpen('inventory-modal')) loadInventory();
+        return;
+    }
     if (data.undone) {
         // This station's last card taken back (Settings -> Stations, or the station itself)
         addLog(timeNow(), 'warning', `Removed ${data.undone} from the inventory (undo)`);
@@ -1464,6 +1469,7 @@ function loadInventoryCameras() {
 
 async function loadInventory() {
     if (!$('inventory-camera').options.length) await loadInventoryCameras();
+    updateClearButton();
     return fetch('/api/inventory?area=scan&camera=' + encodeURIComponent(scannedCamera()))
         .then(response => response.json())
         .then(data => {
@@ -1639,28 +1645,40 @@ async function addToCollection() {
     if (await addScannedToCollection(camera, camera ? select.options[select.selectedIndex].text : '')) inventoryChanged();
 }
 
+function updateClearButton() {
+    // What Clear deletes follows the camera chosen in the list
+    const select = $('inventory-camera');
+    $('inventory-clear-btn').textContent = scannedCamera()
+        ? `Clear ${select.options[select.selectedIndex].text}` : 'Clear all';
+}
+
 async function clearInventory() {
-    if (scannedCamera()) {
-        // It deletes every camera's scanned cards: not from a list that shows one camera's
-        notify('"Clear all" deletes every camera\'s scanned cards - choose "All cameras" first', 'warning');
-        return;
-    }
+    // With a camera chosen: only what that camera scanned (to scan its pile again); else everything
+    const select = $('inventory-camera');
+    const camera = scannedCamera();
+    const cameraName = camera ? select.options[select.selectedIndex].text : '';
     const count = $('inv-cards').textContent;
-    const ok = await confirmDialog({
+    const ok = await confirmDialog(camera ? {
+        title: `Clear the cards ${cameraName} scanned?`,
+        message: `This deletes the ${count} cards scanned by ${cameraName} that are not in the collection yet, to scan them again. The other cameras' scanned cards and your collection are not touched.`,
+        confirmText: `Delete ${cameraName}'s cards`,
+        danger: true
+    } : {
         title: 'Clear the scanned cards?',
-        message: `This deletes the ${count} scanned cards that are not in the collection yet, to start over. Your collection is not touched.`,
+        message: `This deletes the ${count} scanned cards of every camera that are not in the collection yet, to start over. Your collection is not touched.`,
         confirmText: 'Delete everything',
         danger: true
     });
     if (!ok) return;
 
-    addLog(timeNow(), 'warning', 'Clearing inventory...');
+    addLog(timeNow(), 'warning', camera ? `Clearing the cards scanned by ${cameraName}...` : 'Clearing inventory...');
 
-    fetch('/api/clear_inventory?area=scan', {method: 'POST'})
+    fetch('/api/clear_inventory?area=scan&camera=' + encodeURIComponent(camera), {method: 'POST'})
         .then(response => response.json())
         .then(data => {
             if (data.success) {
-                notify(`Scanned cards cleared: ${data.deleted} entries removed`, 'success');
+                notify(camera ? `${cameraName}: ${data.deleted} scanned cards removed`
+                              : `Scanned cards cleared: ${data.deleted} entries removed`, 'success');
                 inventoryChanged();
             } else {
                 notify('Failed to clear inventory: ' + (data.error || 'Unknown error'), 'error');
