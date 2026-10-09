@@ -88,7 +88,7 @@ machine with its own camera still works here too (see [INSTALL.md](INSTALL.md)).
 ## Installation
 
 [DOCKER_GUIDE.md](DOCKER_GUIDE.md) walks through a server and a camera station step by step, with
-what each command should print; [INSTALL.md](INSTALL.md) is the reference for every part. In short:
+what each command should print (and a [75-second video](https://github.com/filipesibinel/scanner-server/releases/tag/demo-video) shows it); [INSTALL.md](INSTALL.md) is the reference for every part. In short:
 
 ```bash
 # the server
