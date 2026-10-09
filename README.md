@@ -83,7 +83,8 @@ machine with its own camera still works here too (see [INSTALL.md](INSTALL.md)).
 
 ## Installation
 
-[INSTALL.md](INSTALL.md) has the steps for each part. In short:
+[DOCKER_GUIDE.md](DOCKER_GUIDE.md) walks through a server and a camera station step by step, with
+what each command should print; [INSTALL.md](INSTALL.md) is the reference for every part. In short:
 
 ```bash
 # the server
@@ -385,8 +386,9 @@ scanned_cards/       Capture images (created at runtime)
 
 [PROGRAM_DOCUMENTATION.md](PROGRAM_DOCUMENTATION.md) explains how everything works inside
 (stations, detection, auto-capture, identification, matching, database);
-[INSTALL.md](INSTALL.md) covers installation; [TEST_CASES.md](TEST_CASES.md) lists what to
-check by hand.
+[INSTALL.md](INSTALL.md) covers installation and [DOCKER_GUIDE.md](DOCKER_GUIDE.md) is the
+step-by-step version ([VIDEO_SCRIPT.md](VIDEO_SCRIPT.md): a script for filming it);
+[TEST_CASES.md](TEST_CASES.md) lists what to check by hand.
 
 ## HTTP API
 

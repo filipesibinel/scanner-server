@@ -20,7 +20,7 @@ on an x86-64 Linux machine with Docker and the Compose plugin. It needs no camer
 git clone https://github.com/filipesibinel/scanner-server.git && cd scanner-server
 mkdir -p data scanned_cards        # before the first start, so they belong to you, not root
 docker compose up -d --build
-docker compose logs -f             # the first start downloads the card data (about 150 MB)
+docker compose logs -f             # the first start downloads the card data (about 75 MB)
 ```
 
 Then open `http://<server>:5000`: an empty list of cameras, and **Collection**. Stop with
@@ -108,7 +108,12 @@ docker compose -f docker-compose.client.yml logs -f
 ```
 
 The station appears on the server's start page; its page is `http://<server>:5000/scan/<id>`.
-It starts again by itself after a reboot.
+It starts again by itself after a reboot. [DOCKER_GUIDE.md](DOCKER_GUIDE.md) walks through the
+server and a station step by step, with what each command should print.
+
+**On the same machine as the server**: use the same folder and `SCANNER_SERVER=http://server:5000`
+(the server's name on the Docker network the two share) - the machine's own address is often
+blocked by its firewall from inside a container.
 
 | Setting | |
 |---|---|
