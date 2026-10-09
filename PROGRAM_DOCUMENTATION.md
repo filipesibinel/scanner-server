@@ -1,122 +1,387 @@
 # Card Scanner - Technical Documentation
 
-How the scanner works inside. For installing and using it see [README.md](README.md); for
-deployment see [INSTALL.md](INSTALL.md).
+How the scanner works inside. For what it is and how to use it see [README.md](README.md); for
+installing the server, the camera stations and the phone app see [INSTALL.md](INSTALL.md).
 
 ## Contents
 
 1. [Overview](#overview)
 2. [Architecture](#architecture)
-3. [Card detection](#card-detection)
-4. [Auto-capture](#auto-capture)
-5. [Identification (vision AI)](#identification-vision-ai)
-6. [Matching the printing](#matching-the-printing)
-7. [Foil and finish](#foil-and-finish)
-8. [Database](#database)
-9. [Focus](#focus)
-10. [Collection page and decks](#collection-page-and-decks)
-11. [Stations](#stations)
+3. [Stations](#stations)
+4. [Card detection](#card-detection)
+5. [Auto-capture](#auto-capture)
+6. [Identification (vision AI)](#identification-vision-ai)
+7. [Matching the printing](#matching-the-printing)
+8. [Foil and finish](#foil-and-finish)
+9. [Database](#database)
+10. [Focus](#focus)
+11. [Collection page and decks](#collection-page-and-decks)
 12. [Web interface](#web-interface)
 13. [Configuration and files](#configuration-and-files)
 14. [Performance](#performance)
-15. [Known limitations](#known-limitations)
+15. [Tests](#tests)
+16. [Known limitations](#known-limitations)
 
 ## Overview
 
 The scanner turns a camera pointed into a box into a card-cataloguing station: cards are dropped
 onto a pile, each new card is detected, captured once, identified down to the exact printing
-and finish, and added to a local inventory.
+and finish, and added to an inventory. It is split in two:
+
+- **Camera stations** - a small computer with a USB webcam (a PC, a laptop, a Raspberry Pi), or
+  a phone - find the card, decide when to capture it, and send one picture per card.
+- **One server** reads the pictures (OCR, then a vision AI), matches the printing, and keeps
+  everything that lasts: the card data, the scanned cards, the collection, the decks, the
+  settings. Its web pages are the only user interface of the computer stations.
 
 Design choices:
 
 - **Classic computer vision for detection.** A card is found by its outline, not by an object
   detection model: fast (milliseconds, fine on a Raspberry Pi), exact corners for a flat
   perspective-corrected crop, and unaffected by foil glare.
-- **A vision AI only reads text.** It reads the name, collector number and set code from the
-  crop, and the ★/• foil marker from a zoomed corner. Any provider works: Gemini, OpenAI,
+- **Detection runs next to the camera.** Stillness and "is this a new card?" are judged frame
+  by frame at camera speed, and the lens is moved between frames; over a network both would
+  depend on its jitter. A station therefore sends one image per card (and a small preview),
+  not a video stream - about 1 Mbit/s, fine on Wi-Fi - and the server does no image work per
+  frame, whatever the number of cameras.
+- **Reading is shared.** One OCR reader and one AI configuration serve every station, each
+  behind its own queue. The AI only reads text: the name, collector number and set code from
+  the crop, and the ★/• foil marker from a zoomed corner. Any provider works: Gemini, OpenAI,
   Anthropic, or a local Ollama model.
-- **The local Scryfall database decides.** AI output is matched against 110,000+ printings;
+- **The local Scryfall database decides.** What was read is matched against 110,000+ printings;
   set code + collector number identify a printing exactly, and only confirmed matches are added
   without review.
+- **A station keeps nothing.** Its camera settings are saved on the server, and a captured
+  image is deleted once the server has it. A station can be replaced or reinstalled without
+  losing anything.
 
 ## Architecture
 
+### The programs
+
+| Program | Runs on | What it does |
+|---|---|---|
+| `app.py` - the server | One machine; a Docker image (`Dockerfile` target `server`) | Web pages, reading (OCR + AI), matching, card data, scanned cards, collection, decks, backups; holds every station's settings |
+| `station_client.py` - a camera station | The machine a USB webcam is plugged into; a Docker image (target `client`, x86-64 and ARM64) | Camera, outline detection, stillness, new-card rules, focus; uploads each capture; shows nothing itself |
+| The Android app ([mtg-scanner-android](https://github.com/filipesibinel/mtg-scanner-android)) in client mode | A phone over the box | The same job with the phone's camera (a Kotlin port of the detection); uploads each capture. It can also work on its own, without a server |
+
+`app.py` can still open a camera itself (`camera.type` other than `remote`): the server then
+has one local camera, as the single-machine scanner this grew from. Everything below about
+detection, auto-capture and focus is the same code in both cases - `CardScanner` either runs
+inside `app.py` or inside `station_client.py`.
+
 ### Modules
 
-| Module | Responsibility |
-|---|---|
-| `app.py` | Flask + Socket.IO server: routes, events, capture orchestration, station captures |
-| `identification.py` | Reading a card, shared by every camera: light-ocr, the vision AI, and the queue in front of each (`Identification`) |
-| `stations.py` | Stations: cameras elsewhere that capture cards themselves and upload them (`data/stations.json`) |
-| `station_client.py` | The camera station program: `CardScanner` next to the camera, connected to the server (runs on the camera's machine, not on the server) |
-| `remote_scanner.py` | `RemoteScanner`: what the server holds instead of a `CardScanner` when the camera is at a station; the `/station` Socket.IO namespace |
-| `pending.py` | Captures in the queues, on disk until settled (`data/pending_captures.db`) |
-| `backups.py` | Backups of the collection, the scanned cards and the decks, made and restored on the collection page |
-| `scanner.py` | Camera (USB via OpenCV/V4L2 or Pi camera), capture thread, detection state, stability, auto-capture |
-| `object_detector.py` | Outline detection (`find_card_outline`), perspective warp (`warp_card`) |
-| `card_ocr.py`, `ocr/server.mjs` | light-ocr reader: the Node.js process that runs the OCR models (kept running, one request per line), and the parsers that pick name, number, set code and foil marker from the text lines |
-| `card_identifier.py` | Vision AI providers (`_ask`), response parsing, foil marker check, model warm-up |
-| `prompts.py` | Built-in prompts and the ones edited in Settings (`data/prompts.json`), per model |
-| `database.py` | Scryfall download and import, schema/migrations, searches, printing lookup, match confidence |
-| `games/` | Card games: `base.Game` (the interface the app uses), `mtg.Magic` (Scryfall data, matching, finishes, exports); `games.active()` is the game being scanned |
-| `card_search.py` | Magic search helpers combining name, number, set and treatment |
-| `inventory.py` | Inventory table for every game: schema + migration, add (merging duplicates), undo, edit/split, bulk edits, locations and tags, delete, stats, CSV import/export |
-| `decks.py` | Decks (`decks`, `deck_cards`): lists of card names with a count and a board; never touches the inventory |
-| `games/mtg_decks.py` | Magic deck formats, the deck checks (size, copies, color identity, legality) and text decklists |
-| `recommendations.py` | Deck ideas from EDHREC, MTGJSON, Archidekt and Moxfield, cached in `web_cache` |
-| `settings.py` | UI preferences persisted in `data/settings.json` |
-| `config.py`, `config_loader.py` | Settings from `config.yaml` (+ environment variables) |
-| `cleanup.py` | Deletes old scanned images (on startup and as a CLI) |
-| `setup_database.py` | Downloads and builds the card database |
-| `templates/scanner.html`, `static/` | The scanner page |
-| `templates/collection.html`, `static/js/collection.js`, `static/css/collection.css` | The collection page (`/collection`): inventory management, deck builder, statistics |
-| `static/js/common.js`, `templates/_icons.html`, `templates/_dialogs.html` | Shared by both pages: text helpers, in-page dialogs and notifications, the inventory edit dialog, the capture viewer, the icon sprite |
+| Module | Runs in | Responsibility |
+|---|---|---|
+| `app.py` | server | Flask + Socket.IO: pages, routes, events; one desk per station (`Desk`, `desk()`); station captures (`station_capture`, `submit_capture`); what happens to a read card (`route_identified`) |
+| `identification.py` | server | Reading a card, for every camera: light-ocr, the vision AI, the queue in front of each (`Identification`) |
+| `card_ocr.py`, `ocr/server.mjs` | server | light-ocr reader: the Node.js process that runs the OCR models (kept running, one request per line), and the parsers that pick name, number, set code and foil marker from the text lines |
+| `card_identifier.py` | server | Vision AI providers (`_ask_*`), response parsing, foil marker check, model warm-up |
+| `prompts.py` | server | Built-in prompts and the ones edited in Settings (`data/prompts.json`), per model |
+| `stations.py` | server | The stations (`data/stations.json`): name, location, counters, and each one's settings (`StationSettings`) |
+| `remote_scanner.py` | server | `RemoteScanner`: what the server holds in place of a station's `CardScanner`; `CameraHub`: the `/station` Socket.IO namespace the clients connect to |
+| `pending.py` | server | Captures in the queues, on disk until settled (`data/pending_captures.db`) |
+| `review.py` | server | The review queue (`review_queue` table, `data/review/`), per station |
+| `database.py` | server | Scryfall download and import, schema / migrations, searches, printing lookup, match confidence |
+| `games/` | server | Card games: `base.Game` (the interface the app uses), `mtg.Magic` (Scryfall data, matching, finishes, exports); `games.active()` is the game being scanned |
+| `card_search.py` | server | Magic search helpers combining name, number, set and treatment |
+| `inventory.py` | server | Inventory table for every game: schema + migration, add (merging duplicates), undo, edit / split, bulk edits, locations and tags, which station scanned what, move to the collection, CSV import / export |
+| `decks.py`, `games/mtg_decks.py` | server | Decks (`decks`, `deck_cards`): lists of card names; formats, deck checks, text decklists |
+| `recommendations.py` | server | Deck ideas from EDHREC, MTGJSON, Archidekt and Moxfield, cached in `web_cache` |
+| `backups.py` | server | Backups of the collection, the scanned cards and the decks |
+| `settings.py` | server | Choices made in the web interface, in `data/settings.json` |
+| `cleanup.py`, `setup_database.py` | server | Old capture images (on startup and as a CLI); downloading the card database |
+| `station_client.py` | station | `Station`: connects to the server, runs a `CardScanner`, reports status and preview, executes the server's commands, uploads captures |
+| `scanner.py` | station (or server, with a local camera) | `CardScanner`: camera (USB via OpenCV / V4L2, or Pi camera), capture thread, detection state, stillness, auto-capture, fixed area, focus |
+| `object_detector.py` | station (or server) | Outline detection (`find_card_outline`), perspective warp (`warp_card`) |
+| `config.py`, `config_loader.py` | both | Settings from `config.yaml` and the environment |
+| `templates/`, `static/` | server | The pages: `stations.html` (the cameras), `scanner.html` (one camera's page), `collection.html`; shared `_topbar.html`, `_dialogs.html`, `_icons.html`, `common.js` |
+| `tests/` | - | `test_ownership.py`: which station scanned what, and backups (see [Tests](#tests)) |
+
+A station must not import the server's modules: its image contains only `station_client.py`,
+`scanner.py`, `object_detector.py`, `settings.py`, `config.py`, `config_loader.py` and
+`config.yaml`.
 
 ### Threads
 
+Server:
+
 | Thread | What it does |
 |---|---|
-| Main | Flask + Socket.IO (threading mode) - HTTP routes, Socket.IO events, MJPEG stream |
-| Capture (`scanner._capture_frames`) | Reads frames, detects the card, tracks stability, draws the overlay, triggers auto-captures |
-| Auto-capture callback | One short-lived thread per auto-capture: crops, saves and (in review mode) identifies the card |
+| Main | Flask + Socket.IO (threading mode): one thread per request - pages, REST, Socket.IO events of the pages and of the stations, the MJPEG streams, capture uploads (several at once) |
 | OCR worker (`Identification._ocr_worker`) | Reads queued captures with light-ocr, one at a time; passes on what it can't settle |
 | AI workers (`Identification._ai_worker`, `vision_ai.workers`, default 3) | Ask the vision AI about the cards OCR passed on, several at once |
-| Identified worker (`Identification._done_worker`) | Hands each read card back (lookup, add or review queue), one at a time |
-| Background tasks | Card database update/rebuild, startup image cleanup, model warm-up, card data update check (10 s after startup, then daily) |
+| Identified worker (`Identification._done_worker`) | Hands each read card back - lookup, add or review queue (`route_identified`) - one at a time |
+| Background tasks | Card database update / rebuild, startup image cleanup, model warm-up, card data update check (10 s after startup, then daily), "What can I build?" searches |
 
-Frames and detection state are shared under `scanner.frame_lock`; the card database and
-inventory use a re-entrant lock each around a shared SQLite connection (WAL mode).
+Station (`station_client.py`):
 
-**No camera.** The app starts without one (the collection page needs none):
-`CardScanner._open_camera` logs one warning and sets `camera_error`, and the capture thread
-tries again every `CAMERA_RETRY_SECONDS` (3 s), silently, until it opens - no restart. On Linux
-a missing `/dev/videoN` is seen before OpenCV is asked (which would print its own errors at
-each try); a device that opens but sends no first frame counts as no camera too. While
-running, `CAMERA_LOST_AFTER` (20, ~2 s) failed reads in a row (`_read_failed`: unplugged)
-close the camera, clear the frame and go back to waiting - one warning instead of an error
-per frame. `camera_error` is part of `/api/detection_status`: the scanner page covers the
-video with the reason ("No camera") and disables the capture button.
+| Thread | What it does |
+|---|---|
+| Main (`Station.report_loop`) | Status every 0.2 s; the preview while a page is watched |
+| Capture (`CardScanner._capture_frames`) | Reads frames, detects the card, tracks stillness, draws the overlay, triggers auto-captures |
+| Auto-capture callback (`Station.auto_captured`) | One short-lived thread per capture: crops and saves the card, waits for a focus probe, sends the beep, queues the upload |
+| Uploads (`Station.upload_loop`) | Sends captures in order; retries until the server has each |
+| Socket.IO client | The server's commands (`on_command`, `on_set`); focus sweeps and probes run in their own threads |
+
+Frames and detection state are shared under `scanner.frame_lock`; the card database, each
+inventory, the review queue, the stations and the pending captures each have their own lock
+around a SQLite connection or file. On the server, anything that concerns one station's card
+runs "at its desk" (`in_desk`), which decides where its events and log lines go - see
+[A page per camera](#a-page-per-camera).
+
+**No camera.** A station starts without one: `CardScanner._open_camera` logs one warning and
+sets `camera_error`, and the capture thread tries again every `CAMERA_RETRY_SECONDS` (3 s),
+silently, until it opens - no restart. On Linux a missing `/dev/videoN` is seen before OpenCV is
+asked (which would print its own errors at each try); a device that opens but sends no first
+frame counts as no camera too. While running, `CAMERA_LOST_AFTER` (20, ~2 s) failed reads in a
+row (`_read_failed`: unplugged) close the camera, clear the frame and go back to waiting - one
+warning instead of an error per frame. `camera_error` is part of the station's status and of
+`/api/detection_status`: the station's page covers the video with the reason and disables the
+capture button. **No station** is the same to the page: `RemoteScanner.camera_error` then says
+that no camera station is connected.
 
 ### Flow of a card
 
 ```
-camera frame ──> outline detection ──> settled? ──> new card? ──> capture
-                                                                     │
-      flat, perspective-corrected card image <───────────────────────┘
-                 │
-                 ├──> light-ocr: name, collector number, set code, foil marker
-                 │      confirmed printing? done (vision AI only for a missed foil marker)
-                 ├──> otherwise vision AI: name, collector number, set code
-                 └──> vision AI: foil marker (zoomed bottom-left corner)
-                                    │
-                    database: set + number (checked against the name)
-                              → name + number → name → fuzzy name
-                                    │
-              confirmed printing ──> added to the inventory (with Undo)
-              uncertain ──────────> shown for review, auto scanning paused
+ CAMERA STATION                                   SERVER
+ camera frame ─> outline ─> settled? ─> new card?
+                                            │ capture: flat, perspective-corrected card image
+                                            │ (the beep: drop the next card)
+                                            └── upload ──────────> saved, on record until settled
+                                                                          │
+                                  OCR queue: light-ocr reads name, collector number, set code, ★/•
+                                     confirmed printing? done (the AI only for a missed ★/•)
+                                                                          │ otherwise
+                                  AI queue: vision AI reads name, number, set code (+ ★/• corner)
+                                                                          │
+                                  card data: set + number (checked against the name)
+                                             → name + number → name → fuzzy name
+                                                                          │
+                                  confirmed printing ──> scanned cards (with Undo), the station's page is told
+                                  uncertain ───────────> the station's review queue; scanning goes on
+                                                                          │
+                                  "Add to collection" ──> the collection (all cameras, or one camera's)
 ```
 
+With "Add cards automatically" off (a computer station only), a capture is read at once and
+shown on the station's page, and the station holds its next capture until **Add** or **Skip**.
+
+## Stations
+
+A station is a camera somewhere: it finds and captures the card itself and sends the picture
+to the server, which does everything after that. There are two kinds, and they use the same
+upload:
+
+| | Camera station (`station_client.py`) | Capture-only station (the Android app, or any program) |
+|---|---|---|
+| Sends captures | `POST /api/stations/<id>/captures` | The same |
+| Stays connected | Yes: Socket.IO namespace `/station` - status, live view, commands | No |
+| Its page on the server | Live view, capture button, auto scanning, focus, fixed area, rotation | The same page without the camera panel |
+| User interface | The server's page | Its own (the phone's screen) |
+
+A station is known by an **id** it chooses and keeps (1-40 letters, digits, `-`, `_`). It
+appears the first time it connects or sends a card (`stations.py`, `data/stations.json`: name,
+location, capture count, last seen, whether it has a camera the server can show, its settings).
+
+### Sending a capture
+
+`POST /api/stations/<id>/captures` (multipart; `app.py: station_capture`):
+
+| Field | |
+|---|---|
+| `image` | The card as the station cut it out (JPEG as it is, or PNG) |
+| `foil_image` | Optional: the perspective-corrected card, for the ★/• foil check by the AI - when `image` is something else (a fixed area) |
+| `foil_is_image` | Optional, `1`: `image` is the perspective-corrected card itself, so no `foil_image` is needed |
+| `name` | Optional: what the station calls itself (used until it is renamed on the server) |
+| `wait` | Optional: seconds to wait for the outcome (default 30, at most 120; 0 answers at once) |
+| `capture_id` | Optional: the station's own id for this capture (up to 64 characters). Sent again - no answer came the first time - it is the same capture, answered with its outcome, not a second card |
+| `mode` | `station_client.py` only: `review` = read it now and show it on the station's page instead of adding it (a manual capture, or auto scanning that waits for Add / Skip) |
+
+The image is saved in `scanned_cards/` as `<id>_<n>_<time>.jpg` and goes through the two
+queues (see [Identification](#identification-vision-ai)), always as when adding automatically:
+a confirmed printing is added to the scanned cards, anything else goes to the station's review
+queue. The answer:
+
+```
+{"capture": 12, "status": "added", "seconds": 0.31,
+ "card": {"name": ..., "set": ..., "number": ..., "finish": ..., "quantity": 1},
+ "read": {"name": ..., "number": ..., "set": ..., "foil": ..., "reader": "light-ocr"}}
+{"capture": 13, "status": "review", "reason": "printing not confirmed" | "not found" | "not read" | "game switched", ...}
+```
+
+or `202` with `"status": "pending"` when the card isn't settled within `wait` (it still is,
+afterwards). Errors: `400` (bad id, no readable picture), `401` (token), `413` (over 30 MB).
+
+| Also | |
+|---|---|
+| `GET /api/stations/<id>/captures/<n>` | The outcome of a capture that was still pending (`202` while it still is). Outcomes of the last 500 captures are kept in memory: `404` after a restart |
+| `POST /api/stations/<id>/undo` | Take back the station's last automatic add |
+| `GET /api/stations` | The stations, with whether each is connected, sees a card, is scanning, and how many cards it has in review |
+| `PUT /api/stations/<id>` | Rename it (`name`) or set where its cards are put (`location`) |
+| `DELETE /api/stations/<id>` | Forget it - after clearing its scanned cards and review items (`clear_camera`, every game), so nothing of it is left where no page shows it. Cards already in the collection stay |
+
+- **Token**: with `stations.token` in `config.yaml` (or `SCANNER_STATION_TOKEN`) set, uploads,
+  the outcome, undo and the `/station` connection need it (header `X-Station-Token`, or `token`
+  in the connection's `auth`). Without it anyone on the network can send cards - like the web
+  interface itself, which has no login.
+- **Order**: a card the AI had to read is added after cards dropped later that OCR confirmed.
+  The entry gets the time its capture arrived (`add_card(when=...)`), so the scanned list stays
+  in dropping order.
+- **Location**: a station's cards get its own location (the page's *Scan into location*).
+- **Undo** is kept per station (`InventoryManager.last_added[source]`): one station's Undo never
+  takes back another's card.
+- **The Android app** in client mode (`server/ScannerServer.kt` there): uploads each capture
+  with a `capture_id`, shows the answer, asks again while it is pending and uses the undo
+  endpoint. Change the answer's fields and its `ServerOutcome.parse` (and `ServerOutcomeTest`)
+  must follow.
+
+**Captures survive a restart.** Every capture that goes into the queues is on record in
+`data/pending_captures.db` (`pending.py`, written by `submit_capture`) from the moment it is
+accepted until it is added or in the review queue; its image is in `scanned_cards/` (a
+separate foil image as `<name>_foil.jpg`, deleted afterwards). At startup `resume_pending`
+queues what is still on record. Measured 2026-10-08: container killed (`docker kill`) with 110
+captures on record; after the restart all were added, 120 cards for 119 accepted uploads. It is
+"at least once": the extra card is an upload recorded just before the kill whose answer never
+reached the sender, or a card added just before the kill and not yet taken off the record (then
+added again). A station that got no answer and sends the picture again would add the card
+twice too - which is what `capture_id` prevents (`seen_captures`, kept with the pending record
+across a restart).
+
+Measured 2026-10-08 (server in Docker, OCR on an RTX 4070 Ti SUPER, a laptop on Wi-Fi sending
+recorded captures): one station at a card every 2.5 s - 30 of 30 added, 29 by OCR in 0.34 s
+(median, upload included) and 1 by the AI in 1.2 s; four stations at a card every 0.5 s each
+(7.8 cards/s) - 100 of 100 added, OCR median 0.48 s, worst 1.0 s.
+
+### A camera station
+
+`station_client.py` runs the real `CardScanner` next to the camera - capture thread, outline
+detection, stillness, new-card rules, focus sweeps and probes, all at camera speed. On the
+server `app.py` holds a `RemoteScanner` (`remote_scanner.py`) in its place, one per station
+(`CameraHub.scanner(id)`): the same attributes and methods, so the page's handlers are the same
+whether the camera is local or at a station.
+
+The client opens the connection (Socket.IO namespace `/station`, `auth`: id, name, token) and
+keeps it; nothing has to be configured on the server to add a camera.
+
+| Client → server | |
+|---|---|
+| `hello` | Answered with the camera's saved settings (`CAMERA_SETTINGS`: focus position, rotation, focus check interval, fixed area, debug trace) and the attributes the server decides (`DECIDED`: add automatically, stability frames, capture delay). The client creates its `CardScanner` with them - which is when the camera opens; after a reconnect only the decided attributes are applied again |
+| `status` (every 0.2 s) | The scanner's state and `get_detection_status()`; the answer says whether the preview is being watched |
+| `preview` | The annotated live view as JPEG (`get_stream_jpeg`), at most ~12 a second and only while a page shows `/video_feed` (measured: 12 fps, 66-81 KB a frame over Wi-Fi) |
+| `setting` | A camera setting the scanner changed (a focus sweep's result, ...): saved on the server |
+| `log`, `captured` | The scanner's log lines, shown on the station's page; the capture beep (`auto_capture_triggered` to its pages) |
+
+| Server → client | |
+|---|---|
+| `command` | A `CardScanner` method (`METHODS`: rotation, fixed area, focus, detection, and `capture` for the page's Capture button), waited for (6 s); the answer carries the result or the error text (raised as `ValueError` on the server) and the state after it |
+| `set` | Attributes: `card_under_review`, `auto_capture_enabled`, and the decided ones when they change |
+
+What `app.py` reads on its scanner comes from three places (`remote_scanner.py`): `DECIDED`
+attributes are the server's and are sent to the client; `SENT` ones are set by the server now
+and then but otherwise the client's own (`auto_capture_enabled`, `card_under_review`);
+`REPORTED` ones only come from the client's status. With no client connected the camera
+settings are read from the saved values, so the page still shows them.
+
+- **Its settings live on the server.** The client's `CardScanner` gets a `ServerSettings`
+  object (get / set) filled by `hello`; every change it makes is sent back (`setting`).
+  `StationSettings` keeps them per station in `stations.json`; a value a station doesn't have
+  yet is read from `settings.json` (what the single camera used before stations).
+- **Captures** go out through a queue (`Station.upload_loop`): in order, each with a
+  `capture_id`, retried until the server has it, then the local file is deleted. `mode: auto`
+  is added or queued for review; `mode: review` is read at once and shown on the page, and the
+  client holds its next auto-capture until the page says Add or Skip (`card_under_review`).
+- **The server or the network goes away**: the station keeps scanning and the captures wait;
+  the client reconnects by itself (~5 s after a server restart). Its own state decides
+  `auto_capture_enabled`: a connection that drops and comes back goes on scanning; a client
+  that restarts has it off, and its pages are told (`auto_capture_toggled`).
+- **The same id connecting again** replaces its earlier connection.
+- **Which camera**: `camera.usb_index` in the station's `config.yaml`, or
+  `SCANNER_CAMERA_INDEX` - a number, or a `/dev/v4l/by-id/...` path, which stays the same
+  camera when the numbers change (`config.usb_camera_index`).
+
+Measured 2026-10-08 (laptop, Ryzen 5 7235HS, Anker PowerConf C200, Wi-Fi; server in Docker):
+manual capture to card on the page 2.7 s when the AI had to read it, auto-capture to added
+0.4 s (OCR); a focus sweep asked from the page, its result saved on the server; fixed area,
+rotation, focus check interval and detection switched from the page; server stopped for 12 s
+with a capture waiting - sent when it was back, one card; the same `capture_id` twice - one
+card. Client load: ~30% of one core, 155 MB (66 MB in the container). A live run of 17 cards:
+17 captures, 17 added, all read by OCR (median 0.11 s), 1.7 s per card.
+
+Measured 2026-10-09 on a Raspberry Pi 5 (8 GB, Raspberry Pi OS / Debian 13, the same camera,
+Wi-Fi, the client in its container): ~50% of one core idle, ~70% while scanning, 75 °C, no
+throttling; live view 11.6 fps; a live run of 18 cards in 28 s (1.6 s per card), all read by
+OCR.
+
+### A page per camera
+
+Every station has its own scanner page, `/scan/<id>`: its live view and controls, the card it
+is showing, its review queue, its Undo, its activity log and its scanned-cards count. `/` lists
+the stations (`templates/stations.html`, refreshed from `GET /api/stations`) - or, when the
+server has a camera of its own, is that camera's scanner page.
+
+On the server each station has a **desk** (`app.py: Desk`, `desk_for`): its scanner, the card
+on its page (`current_card_info`), its open review, the capture being reviewed, its captures
+being read. The handlers were written for one camera and still read that way: `desk()` gives
+the current desk and `scanner` is a proxy for `desk().scanner`. Which desk is current:
+
+| Where | The desk |
+|---|---|
+| A scanner page's Socket.IO event | The station the page named when it connected (`io({query: {station}})`, `page_stations`); the page's socket is in the room `station:<id>` |
+| An HTTP request | `?station=<id>` (the scanner page adds it to every `/api/` request - a wrapper around `fetch` at the top of `scanner.js`), or the id in `/api/stations/<id>/...` |
+| A worker thread | The one set with `in_desk(...)`: `submit_capture` remembers its desk for the result, the OCR / AI workers run each job in its desk (`Job.scope`), a `RemoteScanner`'s callbacks in its station's (`at_station`) |
+| Anything else | `default_desk`: the server's own camera - or, without one, a desk with no camera |
+
+Events about a card go to the desk's room only (`emit_desk`: captured, found, added, queued
+for review, log lines, the capture beep, camera settings); events about shared things stay
+broadcasts (card data, game, AI provider, the scanned list changing).
+
+| Per station | Shared by all |
+|---|---|
+| Camera settings (focus, rotation, fixed area, focus check interval), add automatically, debug trace | The game being scanned (switching it stops every camera) |
+| Location for scanned cards | AI provider, model, keys, prompts, OCR first |
+| Review queue, Undo, the card on the page | Card data, the collection, decks, backups |
+| Count of cards scanned | Sound settings |
+
+### The scanned cards, by camera
+
+The scanned cards are **one list** (`scan_inventory`), with a camera filter - so there is one
+place to check everything and one "Add to collection", and each camera's page still shows only
+its own.
+
+The same printing scanned by two cameras into the same location is one entry, so who scanned
+what is recorded beside the entries: the station of every capture (`inventory_captures.station`)
+and how many of an entry's copies each station added (`inventory_sources`; `add_card(source=)`).
+Everything that concerns "a camera's cards" goes through `InventoryManager._station_rows`: the
+entries a station has copies in, with as many copies as it added - at most what the entry still
+has.
+
+| | With a camera chosen | "All cameras" |
+|---|---|---|
+| List (`GET /api/inventory?area=scan&camera=<id>`) | That camera's entries; `quantity` is its copies, `entry_quantity` the entry's, `shared` when they differ - the page then offers no edit / delete, which act on the whole entry | Every entry, with `cameras: {name: copies}` |
+| Add to collection (`POST /api/scan_inventory/to_collection`, `take_from(station=)`) | Only its copies and captures move; the rest stays | Everything |
+| Clear (`POST /api/clear_inventory?area=scan`, `clear_camera`) | Its copies, its capture images and its review items (a review open on its page is closed) | Every scanned card; the review queues stay |
+| Top bar count (`scan_stats`) | On a station's page: its own cards | |
+
+- A station's page opens the list on its own camera.
+- **Ownership follows the copies** when an entry is split or merged (`_move_sources`): the
+  stations of the newest captures give up a copy each, as those captures move too. For copies
+  without a capture (added by hand), the station that came to the entry last gives up first.
+- **A move is finished after a crash for the camera it was for**: the note in `pending_moves`
+  carries the station (simulated 2026-10-08: moved once, the other camera's copy still scanned).
+- **Backups** include `inventory_sources`; a backup made before stations restores with no
+  ownership rather than keeping today's.
+
+Measured 2026-10-08 with two pages open at once (a camera station and a station uploading
+captures): each page received only its own station's events, including the OCR / AI log
+lines; review queues, focus-check interval and location were each station's own.
+
 ## Card detection
+
+This chapter, [Auto-capture](#auto-capture) and [Focus](#focus) describe `CardScanner` (`scanner.py`, `object_detector.py`): it runs where the camera is - inside `station_client.py`
+on a camera station, or inside the server when that has a camera of its own. The Android app
+has the same rules ported to Kotlin (its README maps the files).
 
 **Frames.** USB cameras deliver MJPEG; the scanner asks OpenCV for the raw JPEG
 (`CAP_PROP_CONVERT_RGB = 0`) and `grab()`s every frame off the camera (so frames are never stale)
@@ -125,10 +390,10 @@ at **half size** (2560 × 1440 → 1280 × 720): detection, stability, focus mea
 preview stream all work at that size, and a capture decodes the stored JPEG at full size and
 scales the card's corners up (`get_detected_card`, `get_full_frame`). OpenCV runs with 2 threads
 (`cv2.setNumThreads(2)`) - its default of one thread per core spent more CPU spin-waiting than
-working. The preview stream encodes each new frame once, shared by all browser tabs
-(`get_stream_jpeg`).
+working. The preview encodes each new frame once (`get_stream_jpeg`): a station sends that JPEG to the
+server while a page is watching, and the server hands it to every browser tab showing the camera.
 
-**Rotation** (`camera.rotate` or **Settings → Camera rotation**, saved as `camera_rotation`;
+**Rotation** (`camera.rotate` or **Settings → Camera rotation**, saved per station as `camera_rotation`;
 `set_camera_rotation` / `camera_rotation_updated`): every frame is rotated right after it is
 decoded - live and the full-size capture (`CardScanner._rotate`) - so detection, crops, the
 fixed area and focus all see an upright card. The card stands along the frame's short side
@@ -241,21 +506,22 @@ pill shows *Focusing*, *Stabilizing n/N*, *Ready*, *Capturing - wait for the bee
 *Captured - drop the next card*.
 
 **Why is it waiting?** When auto scanning waits more than 2 s for a card to become ready,
-`scanner.log` says why, once a second (`_trace_waiting`): *no card outline found* (every 5 s), or
+the scanner's log - the station's output, its page's Activity, and `data/logs/app.log` on the
+server - says why, once a second (`_trace_waiting`): *no card outline found* (every 5 s), or
 *card not ready (n/N)* with the frame's movement, drift, sharpness change and sharpness against
-their limits (1%, 1%, 20%, `min_sharpness`). With **Settings → Debug trace** on (remembered: `debug_trace` in
-`data/settings.json`), the scanner also
+their limits (1%, 1%, 20%, `min_sharpness`). With **Settings → Debug trace** on (remembered per station: `debug_trace`), the scanner also
 keeps the last 3 s of frames (640 px wide - what the outline detector works on) and saves them,
-plus the next second, to `data/debug_frames/<time>_<reason>/` when a card waits over 2 s or a
+plus the next second, to `data/debug_frames/<time>_<reason>/` (on the station's machine) when a card waits over 2 s or a
 new card is detected, or the card is "gone", less than 2 s after a capture (a likely duplicate:
 a foil Gwen Stacy lost its outline right after its capture and was captured again - by its
 look the pair differed 0.79, so appearance can't tell such a case from a new card); the newest 20 dumps
 are kept. Replaying such frames through `CardScanner` with a fake camera reproduces the case.
 
 **The capture beep is the signal to drop the next card.** `auto_capture_triggered` (beep +
-flash) is sent by `app.handle_auto_capture` once the image is taken and a focus probe started by
-that capture is done (`announce_capture`; `scanner.capture_pending` / status `capturing` until
-then). Auto-captures take the image at once (`capture_card_image_only(settle=0)` - the card has
+flash) reaches the station's pages once the image is taken and a focus probe started by that
+capture is done (`scanner.capture_pending` / status `capturing` until then): a station sends
+`captured` at that moment (`Station.auto_captured`) and the server passes it on; with a camera
+on the server it is `app.handle_auto_capture` (`announce_capture`). Auto-captures take the image at once (`capture_card_image_only(settle=0)` - the card has
 already been still for `stability_frames`); the beep used to come *before* the image, which was
 taken 0.3 s later, and a card dropped right away could land in it. Adding a card (after the AI,
 1-2 s later) only plays the success ding. Measured with a fake camera and a probe on every
@@ -294,7 +560,7 @@ stayed the same.
 On a pile of sleeved cards the outline is unreliable: the top card's outline merges with the
 card underneath or the box's corner crease, or flips between the top card and the whole pile -
 cards waited seconds and some were captured twice. The **Fixed area** toggle in the camera panel
-(`set_fixed_area`, saved as `fixed_area_enabled` / `fixed_area` in `data/settings.json`) judges
+(`set_fixed_area`, saved per station as `fixed_area_enabled` / `fixed_area`) judges
 cards by the image inside an area instead (`CardScanner._fixed_area_step`). The area is drawn
 on the video (**Area**: drag around the card; saved as fractions of the frame) or taken from the
 detected card plus 5% (**Use detected card**).
@@ -327,20 +593,20 @@ mid-slide.
 
 ### Adding automatically vs. reviewing
 
-With **Add cards automatically** (default; internally `fast_scan_mode`, saved as `auto_add`):
-the capture is queued, read in the background (`Identification.submit`: OCR, then the AI
+With **Add cards automatically** (default; internally `fast_scan_mode`, saved per station as
+`auto_add`): the capture is uploaded, put on record and queued (`submit_capture`), read in the background (`Identification.submit`: OCR, then the AI
 workers - see [The two queues](#the-two-queues)), and a confirmed printing
 is added immediately by the server (`add_automatically`: one Near Mint copy in
 `Game.suggested_finish` - the same rule as the page's `suggestedFinish`), never through the
 current card, so it can't replace a card being reviewed. It used to be the page that sent the
 add; a tab still running an older script then sent every add without its card and all confirmed
-cards ended in the review queue - and with no page open (phone asleep) nothing was added. Every
-page is told (`inventory_updated` with `auto: true`) and shows the card with an **Undo** button
-(`undo_last_add`).
+cards ended in the review queue - and with no page open (phone asleep) nothing was added. The
+station's pages are told (`inventory_updated` with `auto: true`) and show the card with an
+**Undo** button (`undo_last_add`).
 
 Anything uncertain - printing not confirmed, name not found, no name read - goes to the
-**review queue** (`review.py`, table `review_queue`, a copy of the capture in `data/review/`)
-and scanning goes on (it used to pause until the card was reviewed). Items keep what the AI
+station's **review queue** (`review.py`, table `review_queue` with the station's id, a copy of the
+capture in `data/review/`) and scanning goes on (it used to pause until the card was reviewed). Items keep what the AI
 read, the ★/• result and the best match. The *Review* counter opens them oldest first
 (`review_open` → `review_item`): the capture beside the suggested card, the AI read, and a
 search prefilled with it (without a match kept, the search runs at once). Add resolves the item
@@ -351,10 +617,12 @@ don't disturb the open item, and a card captured during a review in any other wa
 capture, auto scanning without automatic adds) goes to the queue too (`route_identified`)
 instead of taking the reviewed card's place and capture. The review belongs to the page that
 opened it (`review_sid`): when that page disconnects the server closes it, and the page opens
-it again when it reconnects. Per game; kept across restarts.
+it again when it reconnects. Per station and game; kept across restarts.
 
-With the switch off, each capture is identified synchronously and waits for **Add** / **Skip**;
-a card dropped meanwhile is captured right after.
+With the switch off, each capture is uploaded with `mode: review`, read at once
+(`Identification.identify`) and shown on the station's page, where it waits for **Add** / **Skip**;
+the station holds its next capture until then (`card_under_review`), and a card dropped
+meanwhile is captured right after.
 
 ## Identification (vision AI)
 
@@ -371,8 +639,8 @@ Reading a card is shared by every camera (`identification.py`, one `Identificati
 
 So a card OCR confirms never waits behind a slow AI answer. Results are handed back by one more
 thread, one card at a time, in the order they are settled - not the order captured.
-`Identification.identify()` runs both stages in the caller's thread (manual capture, and auto
-scanning that waits for Add / Skip). A capture of a game that is no longer the active one is
+`Identification.identify()` runs both stages in the caller's thread (a capture sent with
+`mode: review`: manual capture, and auto scanning that waits for Add / Skip). A capture of a game that is no longer the active one is
 passed through unread at either stage (see `route_identified`).
 
 Workers measured 2026-10-08 with Ollama (qwen3.5:9b-q8_0, RTX 4070 Ti SUPER, default
@@ -412,8 +680,10 @@ is mostly a collector line too soft to read, which the AI still manages.
 
 The reader is `ocr/server.mjs`, started by `CardOcr` when the app starts (the models take
 1-2 s to load) and restarted after a failure (at most once a minute); its errors go to
-`data/logs/ocr.log`. It needs Node.js 22+ and `npm install` in `ocr/` (`deploy.sh` does it);
-without them the switch is disabled and cards go to the AI. `ocr.provider` in `config.yaml`
+`data/logs/ocr.log`. It needs Node.js 22+ and `npm install` in `ocr/` (the server's Docker image
+has both; `deploy.sh` does it for an installation without Docker); without them the switch is
+disabled and cards go to the AI. Its native library needs glibc 2.38 or newer, and on an NVIDIA
+GPU inside a container the Vulkan driver's X11 / GLVND libraries (see INSTALL.md). `ocr.provider` in `config.yaml`
 chooses GPU or CPU. Only Magic has a parser (`card_ocr.PARSERS`); other games are read by the AI.
 
 ### The vision AI request
@@ -454,7 +724,8 @@ games), prompt kind, and either `default` (all models) or `provider:model`. The 
 this model's, else the all-models one, else the built-in one. **Restore default** removes the
 saved prompt in effect (the model's first).
 
-**Test on last capture** runs the AI on the last captured card (`scanner.last_capture`) with the
+**Test on last capture** runs the AI on the last card read, from any camera
+(`identification.last_capture`), with the
 text in the editor, without saving, and shows the raw answer, how it was read, and the database
 match it would get (confirmed → added automatically, or review). The foil test needs a capture
 with a detected outline.
@@ -573,7 +844,7 @@ the choices come from `GET /api/inventory/<id>/printings`, i.e. `Game.printings`
 far): the set, number, rarity, card id and price change, the photos stay with the copies, and
 several copies split the same way. `bulk_update` applies one change (delete, condition,
 location - whole stacks -, add / remove a tag) to several entries. Cards added while scanning
-get the `scan_location` setting (Settings → Scan into location). Inventories from before
+get their station's location (Settings → Scan into location; `scan_location()`). Inventories from before
 locations are rebuilt once on startup (the key changed): backup in
 `data/backups/inventory_before_locations_<time>.db`, row ids kept (the captures point at them),
 entry and card counts checked, one transaction.
@@ -585,8 +856,8 @@ the printing's price in that finish (`Game.get_card` + `inventory_fields`); rows
 
 **`inventory_captures`** (also `inventory.py`) - one row per captured copy behind an entry:
 `inventory_id`, `file` (a thumbnail in `data/captures/`, 400 px tall, ~25 KB - the captures in
-`scanned_cards/` are deleted after `cleanup.days`), `captured_at`. The capture follows the card
-from the AI worker to the add: `search_and_emit_card` puts it on the matched card
+`scanned_cards/` are deleted after `cleanup.days`), `captured_at`, and `station` (which station's
+capture it is). The capture follows the card from the queues to the add: `search_and_emit_card` puts it on the matched card
 (`card['capture']`, so a queued automatic add can't take another card's photo), and
 `pending_capture` keeps the one under review for a manual search (the automatic "not found"
 dismissal keeps it, Skip drops it). Several finishes added at once arrive as one
@@ -596,6 +867,10 @@ copies to another finish moves the newest photos with them; merging moves all; l
 quantity drops the newest photos (the usual reason is a card captured twice); deleting or
 clearing entries deletes their files. Entries added before this, or imported, have none.
 `/api/inventory` returns each entry's `captures` (newest first, URLs under `/captures/`).
+
+**`inventory_sources`** (also `inventory.py`) - `inventory_id`, `station`, `quantity`: how many of
+an entry's copies each station added. It only matters for the scanned cards - see
+[The scanned cards, by camera](#the-scanned-cards-by-camera).
 
 Inventories from before multi-game support (`foil`/`surge` flags) are rebuilt once on startup:
 the old table is first copied to `data/backups/inventory_before_multigame_<time>.db`, the
@@ -643,7 +918,8 @@ so a card dropped at the wrong moment can end up blurry.
 
 Because the camera-to-card distance is fixed, the scanner can **lock** the focus instead:
 
-- **Refocus** (button, `reset_focus` → `CardScanner.refocus`): switches autofocus off and runs
+- **Refocus** (button, `reset_focus` → `CardScanner.refocus`, on a station through the `command`
+  message): switches autofocus off and runs
   `focus_sweep()` - a coarse pass over the camera's `focus_absolute` range (step 50), then a fine
   pass (step 10) around the best position, scoring each position by the sharpness of the card
   (or the image centre when there's no card); finally a parabola through the best position and
@@ -652,7 +928,7 @@ Because the camera-to-card distance is fixed, the scanner can **lock** the focus
   less sharp). A lens move takes ~0.4 s to show up in the frames
   (lens + camera buffer), so each position waits 0.45 s; if re-measuring the chosen position
   doesn't confirm it, the sweep repeats with 0.8 s. About 10 s in total. The position is saved
-  (`focus_value` in `data/settings.json`) and restored on startup.
+  (`focus_value`, per station - on the server) and restored when the station starts.
 - **The lens has play**: the same `focus_absolute` reached from above measured up to 5× blurrier
   than from below (395: 22 vs 118, peak 2,480). Sweeps measure while moving up, and every final
   or restored position is approached from 30 below (`_move_focus`).
@@ -701,14 +977,15 @@ Cameras without a `focus_absolute` control (and the Pi camera module) keep their
 
 ## Collection page and decks
 
-**Scanned cards and the collection are two inventories.** The scanner page adds to
+**Scanned cards and the collection are two inventories.** Scanning - every station - adds to
 `scan_inventory` - a second `InventoryManager` on its own file, `data/scan_inventory.db`, with
 the same tables - and its top bar counter, inventory window, edit / delete, Undo, export, import
 and "Clear all" work on that one only (`?area=scan` on the `/api/inventory*` endpoints,
 `inventory_area()` in `app.py`; `/api/stats` reports it as `inventory` and the collection as
 `collection`). So a scanning session can be checked, corrected or thrown away without touching
 the collection. **Add to collection** (`POST /api/scan_inventory/to_collection`,
-`InventoryManager.take_from`) moves every scanned entry of the active game into the collection
+`InventoryManager.take_from`) moves every scanned entry of the active game - or, with a camera
+chosen in the list, that camera's copies - into the collection
 (`inventory` in `cards_database.db`): entries that exist there get the copies added, tags are
 joined, and the capture thumbnails follow (their rows move, the files stay). Both pages ask
 first, with one dialog (`addScannedToCollection` in common.js; `GET` on the same address gives
@@ -742,9 +1019,10 @@ as the scan time).
 ### Backups
 
 The gear button opens the page's settings drawer (`/collection#settings` opens it directly; the
-scanner's drawer links there, and this one links to `/#settings` for camera, AI and sound).
+scanner pages' drawers link there, and this one links to a scanner page's settings for camera,
+AI and sound - `settings_url`).
 **Back up now** (`POST /api/backups`, `backups.create`) writes `data/backups/<date_time>/`:
-`backup.db` with plain copies of `inventory` + `inventory_captures` of the collection
+`backup.db` with plain copies of `inventory`, `inventory_captures` and `inventory_sources` of the collection
 (`collection_*`) and of the scanned cards (`scanned_*`), `decks`, `deck_cards` and an `info`
 row (time, note, counts) - every game - and `captures/`, hard links to the thumbnails those
 entries point at (no extra space; they survive the app deleting its own). It is written to a
@@ -756,13 +1034,15 @@ none, an empty collection makes none, and the last `KEEP_DAILY` (7) are kept. A 
 logged and does not stop the app. Backups made by hand are never deleted automatically.
 
 **Restore** (`POST /api/backups/<id>/restore`, `backups.restore`) first makes an automatic
-backup of the current state ("Before restoring ...", the last 5 are kept), then replaces the
+backup of the current state ("Before restoring ...", the last 5 are kept - never clearing away
+the backup being restored, which may itself be the oldest of them), then replaces the
 rows of each table (the columns the backup has; row ids are kept) and links missing
 thumbnails back. Collection, scanned cards and decks are committed one after the other - the
 collection and the decks are two connections to one file - so a failure part way leaves the
 earlier parts restored; the automatic backup has the state from before. Every page reloads its
-inventory (`inventory_updated`). Card data, the review queue and settings are not part of
-these backups: `scripts/backup.sh` archives all of `data/`.
+inventory (`inventory_updated`). Card data, the review queue, the stations and settings are not
+part of these backups: copy the server's `data/` folder for everything (`scripts/backup.sh`
+does that for an installation without Docker).
 
 `/collection` (`templates/collection.html`, `static/js/collection.js`) works on the active
 game's inventory over the REST endpoints; it listens to `inventory_updated`, `inventory_undone`
@@ -859,199 +1139,40 @@ whether it is foil, so the entries get the right set, finish (`Game.suggested_fi
 price; they are Near Mint at the location given (the deck's name by default), which is also how
 to find them again - filter by that location to move or delete them. Undo does not cover it.
 
-## Stations
-
-A station is a camera somewhere else - a phone, a laptop with a webcam - that finds and
-captures the card itself and sends the image to the server, which does everything after that.
-The server needs no camera of its own.
-
-`POST /api/stations/<id>/captures` (multipart; `app.py: station_capture`):
-
-| Field | |
-|---|---|
-| `image` | The card as the station cut it out (JPEG as it is, or PNG) |
-| `foil_image` | Optional: the perspective-corrected card, for the ★/• foil check by the AI |
-| `name` | Optional: what the station calls itself (used until it is renamed on the server) |
-| `wait` | Optional: seconds to wait for the outcome (default 30, at most 120; 0 answers at once) |
-| `capture_id` | Optional: the station's own id for this capture (up to 64 characters). Sent again - no answer came the first time - it is the same capture, answered with its outcome, not a second card |
-| `foil_is_image` | Optional, `1`: `image` is the perspective-corrected card itself, so no `foil_image` is needed |
-
-`<id>` is chosen and kept by the station (1-40 letters, digits, `-`, `_`); a new id creates the
-station (`stations.py`, `data/stations.json`: name, location, capture count, last seen). The
-image is saved in `scanned_cards/` as `<id>_<n>_<time>.jpg` and goes through the same two
-queues as the scanner page's captures, always as when adding automatically: a confirmed
-printing is added to the scanned cards, anything else goes to the review queue (its row keeps
-the station id in `review_queue.station`). The answer:
-
-```
-{"capture": 12, "status": "added", "seconds": 0.31,
- "card": {"name": ..., "set": ..., "number": ..., "finish": ..., "quantity": 1},
- "read": {"name": ..., "number": ..., "set": ..., "foil": ..., "reader": "light-ocr"}}
-{"capture": 13, "status": "review", "reason": "printing not confirmed" | "not found" | "not read" | "game switched", ...}
-```
-
-or `202` with `"status": "pending"` when the card isn't settled within `wait` (it still is,
-afterwards). Errors: `400` (bad id, no readable picture), `401` (token), `413` (over 30 MB).
-
-- **Location**: a station's cards are put in its own location when it has one
-  (`PUT /api/stations/<id>` with `name` / `location`), else in the scanner page's.
-- **Order**: a card the AI had to read is added after cards dropped later that OCR confirmed.
-  The entry gets the time its capture arrived (`add_card(when=...)`), so the scanned list stays
-  in dropping order.
-- **Token**: with `stations.token` in `config.yaml` (or `SCANNER_STATION_TOKEN`) set, captures
-  need the header `X-Station-Token`. Without it anyone on the network can send cards, like the
-  web interface itself.
-- **Asking later**: `GET /api/stations/<id>/captures/<n>` gives the outcome of a capture that
-  was still pending when its upload was answered (`202` while it still is; outcomes of the
-  last 500 station captures are kept in memory, so `404` after a restart).
-- **Undo**: `POST /api/stations/<id>/undo` takes back that station's last automatic add
-  (`InventoryManager.last_added` is kept per source; the scanner page's own Undo is source
-  `None`). Answered to the pages as `inventory_updated` with `station` and `undone`.
-- `GET /api/stations` lists them; `DELETE /api/stations/<id>` forgets one - after clearing its
-  scanned cards and review items (`clear_camera`, every game), so nothing of it is left where
-  no page shows it. Cards already moved to the collection stay.
-- **The Android app** is such a station in its client mode (`../mtg-scanner-android`,
-  `server/ScannerServer.kt`): it uploads each capture with a `capture_id`, shows the answer,
-  asks again while it is pending and uses the undo endpoint. Change the answer's fields and
-  its `ServerOutcome.parse` (and `ServerOutcomeTest`) must follow.
-- **Settings → Stations** on the scanner page: rename a station, set its location, undo its
-  last card (Socket.IO `undo_last_add` with `station`), forget it. A station's adds don't touch
-  the page's card panel - they show in the activity log (`inventory_updated` carries
-  `station`); a review item says which station it came from.
-
-**Captures survive a restart.** Every capture that goes into the queues - a station's, or the
-scanner page's when adding automatically - is on record in `data/pending_captures.db`
-(`pending.py`, written by `submit_capture`) from the moment it is accepted until it is added or
-in the review queue; its image is in `scanned_cards/` (a separate foil image as
-`<name>_foil.jpg`, deleted afterwards). At startup `resume_pending` queues what is still on
-record. Measured 2026-10-08: container killed (`docker kill`) with 110 captures on record;
-after the restart all were added, 120 cards for 119 accepted uploads. It is "at least once":
-the extra card is an upload recorded just before the kill whose answer never reached the
-sender, or a card added just before the kill and not yet taken off the record (then added
-again). A station that got no answer and sends the picture again adds the card twice too -
-unless it sends a `capture_id`.
-
-Measured 2026-10-08 (server in Docker, OCR on an RTX 4070 Ti SUPER, a laptop on Wi-Fi sending
-recorded captures): one station at a card every 2.5 s - 30 of 30 added, 29 by OCR in 0.34 s
-(median, upload included) and 1 by the AI in 1.2 s; four stations at a card every 0.5 s each
-(7.8 cards/s) - 100 of 100 added, OCR median 0.48 s, worst 1.0 s.
-
-### The scanner page's camera as a station
-
-With `camera.type: remote` (`SCANNER_CAMERA=remote`; the Docker image's default) the server
-opens no camera. `station_client.py` runs the real `CardScanner` next to the camera - capture
-thread, outline detection, stillness, new-card rules, focus sweeps and probes, all unchanged
-and at camera speed - and `app.py` holds a `RemoteScanner` (`remote_scanner.py`) in its place:
-the same attributes and methods, so the page's handlers don't know the difference.
-
-Socket.IO namespace `/station`, opened by the client (`auth`: id, name, token):
-
-| Client → server | |
-|---|---|
-| `hello` | Answered with the camera's saved settings (`CAMERA_SETTINGS`: focus position, rotation, focus check interval, fixed area, debug trace) and the attributes the server decides (`DECIDED`: add automatically, stability frames, capture delay). The client creates its `CardScanner` with them; after a reconnect only the decided attributes are applied again |
-| `status` (every 0.2 s) | The scanner's state and `get_detection_status()`; the answer says whether the preview is being watched |
-| `preview` | The annotated live view as JPEG (`get_stream_jpeg`), at most ~12 a second and only while a page shows `/video_feed` (measured: 12 fps, 66 KB a frame over Wi-Fi) |
-| `setting` | A camera setting the scanner changed (a focus sweep's result, ...): saved in the server's `settings.json` - the station keeps nothing |
-| `log`, `captured` | The scanner's log lines; the capture beep (`auto_capture_triggered` to the pages) |
-
-| Server → client | |
-|---|---|
-| `command` | A `CardScanner` method (`METHODS`: rotation, fixed area, focus, detection, `capture`), waited for (6 s); the answer carries the result or the error text (raised as `ValueError`) and the state after it |
-| `set` | Attributes: `card_under_review`, `auto_capture_enabled`, and the decided ones when they change |
-
-Captures are uploads like any station's (`station_capture`), with `camera=1` - they are the
-page's own cards (its location, its Undo, its card panel) - and `mode`: `auto` goes through
-the queues and is added or queued for review; `review` (a manual capture, or auto scanning
-that waits for Add / Skip) is read at once and shown on the page, and the client holds its next
-auto-capture until the page says Add or Skip (`card_under_review`). Every upload carries a
-`capture_id`; one sent again because no answer came (server restarting, Wi-Fi) is the same
-capture (`seen_captures`, kept with the pending record across a restart). The client sends in
-order from a queue, retries until the server has the image, then deletes its file.
-
-The client's own state decides `auto_capture_enabled`: a connection that drops and comes back
-goes on scanning; a client that restarts has it off, and the pages are told
-(`auto_capture_toggled`). `CameraHub` keeps one `RemoteScanner` per station id; the same id
-connecting again replaces its earlier connection.
-
-### A page per camera
-
-Every station has its own scanner page, `/scan/<id>`: its live view and controls, the card it
-is showing, its review queue, its Undo, its activity log and its scanned-cards count. `/` lists
-the stations (`templates/stations.html`, refreshed from `GET /api/stations`: connected, card in
-view, scanning, cards to review) - or, when the server has a camera of its own (`camera.type`
-other than `remote`), is that camera's scanner page as before. A station that only uploads
-captures (a phone) has a page too, without the live view.
-
-On the server each station has a **desk** (`app.py: Desk`, `desk_for`): its scanner, the card
-on its page (`current_card_info`), its open review, the capture being reviewed, its captures
-being read. The handlers were written for one camera and still read that way: `desk()` gives
-the current desk and `scanner` is a proxy for `desk().scanner`. Which desk is current:
-
-| Where | The desk |
-|---|---|
-| A scanner page's Socket.IO event | The station the page named when it connected (`io({query: {station}})`, `page_stations`); the page's socket is in the room `station:<id>` |
-| An HTTP request | `?station=<id>` (the scanner page adds it to every `/api/` request - a wrapper around `fetch` at the top of `scanner.js`), or the id in `/api/stations/<id>/...` |
-| A worker thread | The one set with `in_desk(...)`: `submit_capture` remembers its desk for the result, the OCR / AI workers run each job in its desk (`Job.scope`), a `RemoteScanner`'s callbacks in its station's |
-| Anything else | `default_desk`: the server's own camera, or in remote mode a desk with no camera |
-
-Events about a card go to the desk's room only (`emit_desk`: captured, found, added, queued
-for review, log lines, the capture beep, camera settings); events about shared things stay
-broadcasts (card data, game, AI provider, the scanned list changing). Kept per station
-(`StationSettings`, in `stations.json`; a value the station doesn't have yet comes from
-`settings.json`): the camera settings, add automatically, debug trace, and its location.
-Shared by all: the game being scanned (switching it stops every camera), the AI provider,
-OCR first, sound, prompts.
-
-**The scanned cards are one list**, with a camera filter. `scan_inventory` records the
-station of every capture (`inventory_captures.station`) and how many of an entry's copies each
-station added (`inventory_sources`) - beside the entries, because the same printing scanned by
-two cameras into the same location is one entry. `GET /api/inventory?area=scan&camera=<id>`
-gives that camera's entries with its copies as `quantity` (`entry_quantity` is the entry's;
-`shared` when they differ - the page then offers no edit / delete, which act on the whole
-entry); without `camera` every entry, with `cameras: {name: copies}`. A station's page opens
-the list on its own camera and counts its own cards in the top bar (`scan_stats`).
-`POST /api/scan_inventory/to_collection` with `camera` moves only that camera's copies and
-captures (`take_from(station=...)`; the note in `pending_moves` carries the station, so a
-crash in between is finished for that camera only - simulated 2026-10-08: moved once, the
-other camera's copy still scanned). The Clear button follows the filter too: with a camera
-chosen it deletes only that camera's copies and capture images (`clear_inventory(station=...)`,
-`POST /api/clear_inventory?area=scan&camera=<id>`), to scan its pile again; with "All cameras"
-everything. Ownership follows the copies when an entry is split or merged (`_move_sources`: the
-stations of the newest captures give up a copy each, as those captures move too) and it is
-part of the backups (`inventory_sources` in `backups.py`; a backup from before stations
-restores with no ownership rather than today's). A camera's clear also drops its review queue items (`ReviewQueue.clear`; a review
-open on its page is closed); "All cameras" leaves the review queues alone. The capture count stays.
-
-Measured 2026-10-08 with two pages open at once (the laptop's camera and a station uploading
-captures): each page received only its own station's events, including the OCR / AI log
-lines; review queues, focus-check interval and location were each station's own.
-
-Measured 2026-10-08 (laptop with the Anker C200 on Wi-Fi, server in Docker): manual capture to
-card on the page 2.7 s when the AI had to read it, auto-capture to added 0.4 s (OCR); a focus
-sweep asked from the page, its result saved on the server; fixed area, rotation, focus check
-interval and detection switched from the page; server stopped for 12 s with a capture waiting -
-sent when it was back, one card; the same `capture_id` twice - one card; the client reconnects
-by itself ~5 s after a server restart. Client load: ~30% of one core (Ryzen 5 7235HS), 155 MB.
-
 ## Web interface
 
-`templates/scanner.html` + `static/js/scanner.js` + `static/css/style.css` (dark/light theme via
-CSS variables). Top bar with statistics; search bar and camera on the left, card panel on the
-right, activity log below; settings in a slide-out drawer. The page polls
-`/api/detection_status` every 500 ms for the status pill (and `camera_error`, the "No camera"
-message over the video) and talks to the server over Socket.IO.
+Three pages, all served by `app.py`, with one header (`templates/_topbar.html`):
 
-Socket.IO events:
+| Page | Template, script | What it is |
+|---|---|---|
+| `/` | `stations.html` (inline script) | The cameras: each station with its state and a link to its page. With a camera on the server itself, `/` is that camera's scanner page instead |
+| `/scan/<id>` | `scanner.html`, `static/js/scanner.js` | One station's scanner page. `window.STATION` tells the script which; a station without a camera gets the page without the camera panel |
+| `/collection` | `collection.html`, `static/js/collection.js` | Inventory, decks, statistics, backups |
 
-| Client → server | Server → client |
+`static/js/common.js` and `templates/_dialogs.html` hold what the pages share (text helpers,
+in-page dialogs and notifications, the edit dialog, the capture viewer, "Add to collection");
+`static/css/style.css` has the dark / light theme (CSS variables).
+
+**The scanner page**: top bar with counters; search bar and camera on the left, card panel on
+the right, activity log below; settings in a slide-out drawer. It polls `/api/detection_status`
+every 500 ms for the status pill (and `camera_error`, the message over the video), shows
+`/video_feed?station=<id>` (MJPEG: each new frame once), and talks to the server over
+Socket.IO. Its socket joins its station's room, and its `/api/` requests carry `?station=`, so
+it only sees its own camera - see [A page per camera](#a-page-per-camera). The settings drawer
+has the station's own settings (scanning, camera), the list of stations (rename, location, undo
+its last card, forget), and the shared ones (vision AI, prompts, card database, sound).
+
+Socket.IO events of the pages (namespace `/`; the stations' own connection is described under
+[A camera station](#a-camera-station)):
+
+| Page → server | Server → page |
 |---|---|
-| `capture_card`, `search_card`, `select_printing`, `add_to_inventory` (`finish` + `quantity`, or `items` for several finishes), `undo_last_add`, `dismiss_card` (`keep_capture` from the automatic "not found" dismissal) | `card_captured`, `card_found`, `card_printings`, `similar_cards`, `card_not_found`, `inventory_updated`, `inventory_prices_updated` (prices fetched after an add), `inventory_undone`, `card_dismissed` |
-| `toggle_auto_capture`, `toggle_fast_scan` (add automatically), `toggle_detection`, `toggle_ocr` (read with OCR first), `toggle_debug_trace`, `toggle_debug_mode` (Flask's debug mode, for the next start), `reset_focus` (refocus + lock), `set_autofocus`, `set_fixed_area` (`enabled` / `area` / `use_detected`), `set_camera_rotation`, `set_refocus_every` (`captures`: focus probe interval) | `auto_capture_triggered` (image taken, focus probe done: drop the next card), `processing_queue_update`, `*_toggled`, `focus_reset`, `fixed_area_updated`, `camera_rotation_updated`, `refocus_every_updated` |
+| `capture_card`, `search_card`, `select_printing`, `add_to_inventory` (`finish` + `quantity`, or `items` for several finishes), `undo_last_add` (with `station` from Settings → Stations: that station's), `dismiss_card` (`keep_capture` from the automatic "not found" dismissal) | `card_captured`, `card_found`, `card_printings`, `similar_cards`, `card_not_found`, `inventory_updated` (`added`: what was added; `undone`: a station's card taken back; `cleared`: scanned cards were cleared - only the counters reload), `inventory_prices_updated` (prices fetched after an add), `inventory_undone`, `card_dismissed` |
+| `toggle_auto_capture`, `toggle_fast_scan` (add automatically), `toggle_detection`, `toggle_ocr` (read with OCR first), `toggle_debug_trace`, `toggle_debug_mode` (Flask's debug mode, for the next start), `reset_focus` (refocus + lock), `set_autofocus`, `set_fixed_area` (`enabled` / `area` / `use_detected`), `set_camera_rotation`, `set_refocus_every` (`captures`: focus probe interval) | `auto_capture_triggered` (image taken, focus probe done: drop the next card), `auto_capture_toggled` (also when the station's client restarted or went away), `processing_queue_update` (the station's captures being read), `*_toggled`, `focus_reset`, `fixed_area_updated`, `camera_rotation_updated`, `refocus_every_updated` |
 | `set_ai_provider`, `save_ai_credential`, `update_database` (the active game's data), `rebuild_database` | `ai_provider_set`, `ai_credential_saved`, `database_update_progress` / `_complete` / `_error`, `database_update_available` (update check found newer data), `database_rebuild_*`, `log`, `error` |
-| `save_prompt` (scope `model` / `all`), `reset_prompt`, `test_prompt` | `prompts_updated`, `prompt_test_result` (sent only to the client that asked) |
-| `undo_last_add` with `station` (Settings → Stations) | `inventory_updated` with `station` (the station's name) for a station's add or undo (`undone`): logged, the card panel stays |
-| `review_open`, `review_skip`, `review_close` | `review_item` (the oldest item, or `id: null` when empty), `review_queue_update` (count; `queued: true` when a card was just queued - the page plays the queue alert) |
-| `set_game` | `game_changed` (to every client; stops auto scanning; downloads the game's card data if it has none). Captures still waiting for the AI keep their game (`game` on the queue item, `game_id` in `route_identified`): they are not looked up as cards of the new game but go, unread, to their own game's review queue |
+| `save_prompt` (scope `model` / `all`), `reset_prompt`, `test_prompt` | `prompts_updated`, `prompt_test_result` (sent only to the page that asked) |
+| `review_open`, `review_skip`, `review_close` | `review_item` (the station's oldest item, or `id: null` when empty; `station`: its name), `review_queue_update` (count; `queued: true` when a card was just queued - the page plays the queue alert) |
+| `set_game` | `game_changed` (to every page; stops every camera's auto scanning; downloads the game's card data if it has none). Captures still waiting to be read keep their game (`game_id` in `route_identified`): they are not looked up as cards of the new game but go, unread, to their own game's review queue |
 
 HTTP endpoints are listed in the README. The collection page adds no Socket.IO events; it only
 listens to the inventory, game and card data events above (and sends `update_database`).
@@ -1069,38 +1190,54 @@ one game exists. Card payloads may carry `finish_options` (only those finishes a
 
 ## Configuration and files
 
+**Server**
+
 | Where | What |
 |---|---|
-| `config.yaml` | Camera, detection, auto-capture, vision AI defaults, web server, cleanup |
-| `.env` | API keys (`GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`); `VISION_AI_PROVIDER` and `LOCAL_AI_ENDPOINT` override `config.yaml` |
-| `data/api_keys.env` | Keys and local endpoint entered in Settings (`api_keys.py`, mode 600); overrides `.env`. The UI only ever receives masked keys (`/api/ai_credentials`) - the web interface has no login |
-| `data/settings.json` | Choices made in the UI: AI provider/model, OCR first, add automatically, locked focus position, sound effects on/off and volume (`sound_enabled`, `sound_volume`; `POST /api/sound`), focus probe interval (`refocus_every`, overrides `auto_capture.refocus_every`), debug trace, debug mode (`debug_mode`: Flask's debugger, and every request in `data/logs/requests.log` - `enable_request_log`, since `setup_logging` silences Werkzeug; overrides `flask.debug`; taken when the server starts, always without the reloader - a second copy of the program could not open the camera) |
+| `config.yaml` | Vision AI defaults, web server, station token, cleanup, card data update interval; `camera.type: remote` (or `SCANNER_CAMERA=remote`, the Docker image's default) for a server without a camera |
+| `.env` (beside `docker-compose.yml`) | API keys (`GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`); `VISION_AI_PROVIDER`, `LOCAL_AI_ENDPOINT`, `SCANNER_STATION_TOKEN`; for Docker also `SCANNER_PORT`, `SCANNER_UID`, `SCANNER_GID` |
+| `data/api_keys.env` | Keys and local endpoint entered in Settings (`api_keys.py`, mode 600); overrides `.env`. The page only ever receives masked keys (`/api/ai_credentials`) - the web interface has no login |
+| `data/settings.json` | Choices made in the web interface that are everyone's: AI provider / model, OCR first, the game, sound on / off and volume (`POST /api/sound`), debug mode (`debug_mode`: Flask's debugger, and every request in `data/logs/requests.log`; taken when the server starts, always without the reloader). Also the camera settings of a camera on the server itself - which a new station inherits until it has its own |
+| `data/stations.json` | The stations: name, location, capture count, last seen, `camera` (it connects as a camera station), and `settings` - each station's `focus_value`, `camera_rotation`, `refocus_every`, `fixed_area`, `fixed_area_enabled`, `debug_trace`, `auto_add` |
 | `data/prompts.json` | Prompt instructions edited in Settings, per game / kind / model (`prompts.py`) |
+| `data/cards_database.db` | Card data (`cards`, `card_data_info`), the collection (`inventory`, `inventory_captures`, `inventory_sources`), decks (`decks`, `deck_cards`), the review queue (`review_queue`) and answers cached from other sites (`web_cache`) |
+| `data/scan_inventory.db` | Cards scanned and not yet added to the collection (the same three inventory tables, and `pending_moves`) |
+| `data/pending_captures.db` | Captures waiting in the OCR / AI queues, queued again after a restart |
 | `data/review/` | Captures waiting in the review queue (deleted when resolved) |
 | `data/captures/` | Thumbnails of the captures behind inventory entries (deleted with their entry) |
-| `data/backups/` | Backups made on the collection page (`<date_time>/`, see Backups); copies of the inventory table made before a migration rebuilds it (`inventory_before_*.db`) |
-| `data/scan_inventory.db` | Cards scanned and not yet added to the collection |
-| `data/stations.json` | The stations: name, location, capture count, last seen |
-| `data/pending_captures.db` | Captures waiting in the OCR / AI queues, queued again after a restart |
-| `data/cards_database.db` | Card data (`cards`, `card_data_info`), inventory, decks (`decks`, `deck_cards`) and answers cached from other sites (`web_cache`) |
-| `data/logs/` | `app.log`, `ai.log`, `scanner.log`, `database.log`, `scanned_cards.log` (one CSV line per identified card; the model column says `light-ocr` when OCR read it), `ocr.log` (errors of the OCR reader process) |
-| `scanned_cards/` | Captured images (deleted after `cleanup.days`) |
+| `data/backups/` | Backups (`<date_time>/`, see Backups); copies of the inventory table made before a migration rebuilds it (`inventory_before_*.db`) |
+| `data/logs/` | `app.log` (also every station's scanner lines), `ai.log`, `scanner.log` (a camera on the server itself), `database.log`, `scanned_cards.log` (one CSV line per identified card; the model column says `light-ocr` when OCR read it), `ocr.log` (errors of the OCR reader process), `requests.log` (debug mode) |
+| `scanned_cards/` | Captured images as uploaded (deleted after `cleanup.days`) |
+
+**Camera station** - nothing it must keep:
+
+| Where | What |
+|---|---|
+| `config.yaml` | The camera (`camera.usb_index`, `resolution`, `fps`), detection and auto-capture thresholds |
+| Environment, or `.env` beside `docker-compose.client.yml` | `SCANNER_SERVER` (needed), `SCANNER_CAMERA_INDEX`, `SCANNER_STATION_ID` (default: the machine's name), `SCANNER_STATION_NAME`, `SCANNER_STATION_TOKEN` - or the same as `--server`, `--id`, `--name`, `--token` |
+| `scanned_cards/` | Captures not sent yet (deleted once the server has them); `data/debug_frames/` with debug trace on |
 
 ## Performance
 
-Measured on an x86-64 laptop with an Anker PowerConf C200 at 2560 × 1440 and a local
-`qwen3.5:9b` on Ollama over the network:
+Measured with an Anker PowerConf C200 at 2560 × 1440 on the station, and on the server (4
+cores of a Ryzen 7 7800X3D, RTX 4070 Ti SUPER) OCR on the GPU and `qwen3.5:9b-q8_0` on Ollama:
 
-| Step | Time |
-|---|---|
-| Camera | 27–29 fps at 2560 × 1440 (MJPEG); 20 fps processed (`camera.fps`) |
-| Per processed frame | ~10 ms (half-size decode, detection, stability) - was ~24 ms at full size |
-| App CPU while scanning | ~20–25% of one core - was ~120% (full-size decode, 8 OpenCV threads) |
-| Outline detection | ~3 ms per frame |
-| Card landed → capture | ~0.15–0.5 s (settling) |
-| OCR identification | ~0.17 s (light-ocr on the GPU; ~0.8 s on the CPU) - 88% of cards need nothing more |
-| AI identification | ~0.9 s (qwen3.5:9b, 1024 px image); the foil check runs in parallel (+~0.3 s with Ollama); ~10 s once if the model has to load |
-| Set + number lookup | 0.1 ms; fuzzy name search ~90 ms |
+| Step | Where | Time |
+|---|---|---|
+| Camera | station | 27-29 fps at 2560 × 1440 (MJPEG); 20 fps processed (`camera.fps`) |
+| Per processed frame | station | ~10 ms (half-size decode, detection, stability) - was ~24 ms at full size |
+| Outline detection | station | ~3 ms per frame |
+| CPU while scanning | station | ~30% of one core on a laptop (Ryzen 5 7235HS), ~70% on a Raspberry Pi 5 |
+| Card landed → capture | station | ~0.15-0.5 s (settling) |
+| Upload, OCR, lookup, add | server | 0.3-0.5 s from capture to "added" for a card OCR confirms (0.10 s of it OCR; 0.67 s on the CPU) |
+| AI identification | server | ~0.9 s (qwen3.5:9b, 1024 px image); the foil check runs in parallel (+~0.3 s with Ollama); ~10 s once if the model has to load. About 2 cards a second with 3 workers |
+| Set + number lookup | server | 0.1 ms; fuzzy name search ~90 ms |
+| Live view | station → server | 12 fps, 66-81 KB a frame (~1 Mbit/s), only while a page shows it |
+| Server load | server | ~0% CPU idle, 210-260 MB; the per-frame work is all on the stations |
+
+A whole pile, card after card: 1.6-1.7 s per card on a laptop station and on a Pi 5 station,
+every card read by OCR. Four simulated stations at a card every 0.5 s each: all added, OCR
+median 0.48 s.
 
 Vision models compared on 90 scans (identification + foil check, before the prompt and image
 size change - identification alone is now 0.9 s / 1.5 s, see *Prompts*):
@@ -1112,12 +1249,40 @@ size change - identification alone is now 0.9 s / 1.5 s, see *Prompts*):
 
 The 9B doesn't fit in a 6 GB GPU (it would be split with the CPU); the 4B is a usable fallback.
 
+## Tests
+
+`tests/test_ownership.py` (`venv/bin/python -m unittest discover tests`; also inside the server
+container) covers which station scanned what - through splits, merges, a move to the
+collection, a clear - and backups: ownership restored, restored over another state, a backup
+from before stations, restoring the oldest automatic backup. Everything runs on temporary
+databases and folders. These are the cases of a code review of 2026-10-09; 13 of the 14 fail
+against the code from before its fixes.
+
+There are no automated tests for the rest. [TEST_CASES.md](TEST_CASES.md) lists what to check
+by hand. For scanner logic, recorded or synthetic frames can be fed through `CardScanner` with
+a fake camera (patch `detect_camera_type` / `_initialize_usb_camera`). **Never test against the
+server's real `data/`**: use copies of the databases in a temporary folder, or a second
+container with its own data folder and port.
+
 ## Known limitations
 
-- **White-bordered cards on a white background** have no visible outline; use
-  a darker background or capture them manually with detection off.
+- **White-bordered cards on a white background** have no visible outline; use a darker
+  background or capture them manually with detection off.
 - **An identical copy landing within ~0.7 mm of the previous card** without the fall hiding the
   card for 6 frames isn't recognized as new - press Capture.
+- **A card hidden for a moment** (a hand over the box for ~0.3 s) counts as a change of card:
+  when it is still the same card it is captured again.
 - **Cards without the ★/• marker** (older printings) get their finish from printing data only.
-- **Undo** takes back only the most recent add; older adds are edited in the inventory.
-- **One camera, one instance**: the camera can only be opened by one process.
+- **Undo** takes back only a station's most recent add; older adds are edited in the list.
+- **At least once**: a capture is never lost by a restart, but in a crash at the wrong moment
+  it can be added twice (see [Sending a capture](#sending-a-capture)).
+- **No login**: the web interface and, without a token, the upload are open to the network.
+  For a home or shop network, not the internet.
+- **A station without a connection** shows no live view and no result until it is back; the
+  captures wait (computer station: until the client is stopped - its unsent captures are files
+  in its `scanned_cards/`, sent only by that run; phone: kept across restarts of the app).
+- **One camera per station**, opened by one process.
+- **Raspberry Pi camera modules** go through `picamera2`, which is not in the client's Docker
+  image and has no focus control here; that path has not been run. USB webcams are what is
+  tested.
+- **Entries shared between cameras** can't be edited from a list filtered to one camera.

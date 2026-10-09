@@ -1,22 +1,23 @@
 # Card Scanner test cases
 
-Prepared from the current README, Flask routes and Socket.IO handlers, Python managers, game adapters, and browser code. This is a proposed test plan; cases have not been executed. No existing automated test suite was found in the repository.
+What to check by hand (and what would be worth automating), for the server, the camera stations and the pages. Prepared from the README, the Flask routes and Socket.IO handlers, the Python managers, the game adapters and the browser code. It is a test plan, not a record: most cases have not been executed as written. The cases marked **(automated)** are covered by `tests/test_ownership.py` (`venv/bin/python -m unittest discover tests`); section 16 lists what was measured while the server / station split was built.
 
 Each row is a test case with setup/action and an observable expected result. Parameter lists mean separate executions for each value. Expected results describe intended behavior; failures should be recorded as defects, not assumed to be supported already. Resilience, accessibility, and malicious-input cases are quality requirements to verify, rather than claims about implemented protections.
 
-Priority: **P0** = release-blocking data integrity or core workflow; **P1** = normal feature coverage; **P2** = robustness or usability. Suggested layers: **U** = isolated Python/JavaScript test; **I** = Flask/Socket.IO/database integration; **E** = browser end-to-end; **H** = physical camera test.
+Priority: **P0** = release-blocking data integrity or core workflow; **P1** = normal feature coverage; **P2** = robustness or usability. Suggested layers: **U** = isolated Python/JavaScript test; **I** = Flask/Socket.IO/database integration; **E** = browser end-to-end; **H** = physical camera test (a camera station with its webcam, or the phone).
+
+"The scanner page" below is a camera's page (`/scan/<id>`), with a camera station (`station_client.py`) connected to a server that has no camera of its own - the normal setup. Magic is the only game today: the cases that need a second game (GAME-*, and the ones naming "a second game") are kept for when one is added.
 
 ## Setup and reusable fixtures
 
-Use a disposable instance with separate databases, settings, capture directories, credentials, and backups. Never run delete, replace-import, restore, rebuild, or interruption cases against the user's collection. Reset fixtures between cases unless the case explicitly tests persistence.
+Use a disposable server - a second container (or `app.py` on another port) with its own data folder - with separate databases, settings, capture directories, credentials, and backups, and point a test station at it. The automated tests and one-off scripts work on copies of the databases in a temporary folder instead. Never run delete, replace-import, restore, rebuild, or interruption cases against the user's collection. Reset fixtures between cases unless the case explicitly tests persistence.
 
 - **MTG cards:** one exact set/number match; a name with multiple printings; regular/foil/surge printings with distinct prices; a foil-only printing; borderless and alternate art; leading-zero and letter-suffix collector numbers; a double-faced card; accented/punctuated names; a basic land; an unlimited-copy card; a limited-copy exception; banned, restricted, and illegal cards; a valid commander, compatible commander pair, and incompatible pair.
-- **Pokémon cards:** `012/193` and a known set abbreviation; same name/number in different sets; normal/holo/reverse/first-edition variants; ex/V/VMAX/VSTAR/GX names; basic Energy; secret rare above the printed total; a card with no price/image.
-- **Inventory:** three copies of printing A, Near Mint, regular, Box 1, price $2; two copies of A, foil, Binder, price $5; one copy of printing B, price $3; at least one Pokémon row. Include rows with no location, multiple tags, captures, and imported rows without a card ID. The six MTG copies have value $19 before other fixtures are added.
-- **Scanned:** two copies matching the collection's A/regular/Box 1 row, one distinct printing, and a Pokémon row; keep their capture thumbnails distinguishable.
+- **Inventory:** three copies of printing A, Near Mint, regular, Box 1, price $2; two copies of A, foil, Binder, price $5; one copy of printing B, price $3; a row of a second game, if there is one. Include rows with no location, multiple tags, captures, and imported rows without a card ID. The six MTG copies have value $19 before other fixtures are added.
+- **Scanned:** two copies matching the collection's A/regular/Box 1 row, one distinct printing, and a row of a second game (if there is one); keep their capture thumbnails distinguishable.
 - **Decks:** an empty deck; Commander decks at 99/100/101 total cards; a 60-card deck with 15/16 sideboard cards; two decks sharing a card; unresolved card names; an explicit printing selection.
 - **Review:** one suggested match, one ambiguous match, one unreadable capture, one missing image, and one item per game.
-- **Services:** stub AI, OCR, Scryfall/MTG data, TCGdex/prices, EDHREC, Archidekt, Moxfield, and local model discovery. Provide success, empty, timeout, rate-limit, malformed, and unavailable responses. Freeze prices/time for deterministic assertions.
+- **Services:** stub AI, OCR, Scryfall/MTG data, EDHREC, Archidekt, Moxfield, and local model discovery. Provide success, empty, timeout, rate-limit, malformed, and unavailable responses. Freeze prices/time for deterministic assertions.
 - **Camera:** recorded frame sequences plus real USB and Raspberry Pi cameras where available; plain/sleeved cards, identical consecutive copies, motion, glare, low light, and portrait/landscape frames.
 
 For data-changing tests compare database rows, summed quantities, per-finish prices, captures, batch attribution, and game/area before and after. UI counters alone are insufficient evidence.
@@ -29,12 +30,12 @@ For data-changing tests compare database rows, summed quantities, per-finish pri
 | BOOT-02 | P1 I/E | Restart an instance containing inventory, scanned cards, decks, and review items. | Stored data and remembered preferences survive without duplication. |
 | BOOT-03 | P1 I/E | Start without an available camera; use collection and manual search. | Camera failure is visible; non-camera features remain usable. |
 | BOOT-04 | P1 E | Navigate scanner → collection → scanner and open Scanned/Review from the top bar. | Correct page/dialog and counts appear; navigation does not mutate data. |
-| GAME-01 | P0 I/E | Switch MTG → Pokémon → MTG with both games populated. | Search, finishes, exports, counts, inventory, and review show only the active game's data. |
-| GAME-02 | P1 I/E | Select Pokémon with no Pokémon data installed. | One background download starts; progress/completion are shown and search becomes usable. |
+| GAME-01 | P0 I/E | Switch MTG → a second game → MTG with both games populated. | Search, finishes, exports, counts, inventory, and review show only the active game's data. |
+| GAME-02 | P1 I/E | Select a second game with none of its data installed. | One background download starts; progress/completion are shown and search becomes usable. |
 | GAME-03 | P0 I/H | Switch game during auto scanning with a current card displayed. | Auto scanning stops; current selection is cleared; the old card cannot be added to the new game. |
 | GAME-04 | P0 I | Switch game while AI work is queued/running; complete the old work. | Capture is kept in the original game's review queue, without trusting a reading made under the changed game. |
 | GAME-05 | P1 I | Submit an unknown game ID. | Error is returned; active game and all data remain unchanged. |
-| GAME-06 | P1 E/I | Select Pokémon and attempt deck-builder APIs directly. | Unsupported deck features are hidden or rejected with a useful error; no MTG deck is changed. |
+| GAME-06 | P1 E/I | Select a game without deck formats and attempt deck-builder APIs directly. | Unsupported deck features are hidden or rejected with a useful error; no MTG deck is changed. |
 
 ## 2. Camera, detection, focus, and fixed area
 
@@ -44,7 +45,7 @@ For data-changing tests compare database rows, summed quantities, per-finish pri
 | CAM-02 | P1 H/U | Present a correctly sized card, then remove it. | Outline/status transitions between detected and no-card states accurately. |
 | CAM-03 | P1 H/U | Present a hand, sleeve edge, background rectangle, and partial card. | False detections do not trigger an automatic capture of a non-card. |
 | CAM-04 | P0 H/U | Move a card, hold it still, then introduce blur. | Focusing/stabilizing/ready statuses track readiness; capture waits for configured stability. |
-| CAM-05 | P1 H/U | Exercise contour detection and optional YOLO fallback with/without its model/dependencies. | Available detector works; unavailable optional fallback produces a useful status without breaking supported detection. |
+| CAM-05 | P1 H/U | Exercise outline detection on a closed outline, a broken one (borderless foil on white), a card in the box's corner and a followed outline. | The card is outlined in each case; a skewed or inner-frame outline is rejected (see PROGRAM_DOCUMENTATION.md, Card detection). |
 | CAM-06 | P1 H/E | Toggle detection off/on; manually capture while it is off. | Detection state updates; manual full-frame capture still works; re-enable resumes detection. |
 | CAM-07 | P1 H/E | Set rotation to 0/90/180/270; capture at each setting; reload. | Stream and saved image match selected rotation; preference persists. |
 | CAM-08 | P1 I | Submit unsupported rotation, nonnumeric rotation, and missing scanner. | Useful errors; previous rotation/data stay valid. |
@@ -99,11 +100,7 @@ For data-changing tests compare database rows, summed quantities, per-finish pri
 | READ-11 | P1 E/I | Search an unknown/partial/misspelled name; select a similar suggestion. | No-match/suggestions are clear; selected result becomes the current card. |
 | READ-12 | P0 I/E | Select one of multiple printing thumbnails; add it. | Stored ID/set/number/image/price match selected printing exactly. |
 | READ-13 | P0 U/I | Read star, dot, unclear, and cropped-away foil markers; use foil-only printing. | Suggested finish and reason follow marker/printing availability; unknown does not imply foil. |
-| READ-14 | P0 E/I | Select every supported finish on representative MTG/Pokémon printings. | Only available finishes are offered; price and stored finish follow the selected variant. |
-| READ-15 | P1 E/I | Identify Pokémon `012/193` with name, with set abbreviation, and without name. | Unique set+number or name+number+total confirms printing; leading zeros are normalized safely. |
-| READ-16 | P0 U/I | Use Pokémon name/number shared by multiple sets, missing total, and conflicting set. | No ambiguous printing is automatically added; review/manual correction is available. |
-| READ-17 | P1 U/I | Identify Pokémon suffix cards, basic Energy, and secret rare above set total. | Suffix/type and printed number remain meaningful; correct candidate or explicit uncertainty results. |
-| READ-18 | P1 E/H | Capture Pokémon reverse holo; manually select reverse holo before add. | UI does not promise image recognition of reverse holo; manual selection persists with its price. |
+| READ-14 | P0 E/I | Select every supported finish on representative printings of each game. | Only available finishes are offered; price and stored finish follow the selected variant. |
 | READ-19 | P1 I | Simulate missing, null, zero, and failed price fetches for both games. | Missing price is shown honestly; card identification/add remains usable without fabricated value. |
 | READ-20 | P0 I | Delay price fetch; split/edit/delete the added row before fetch completes. | Late update affects only applicable surviving rows; it cannot change another printing/finish or resurrect a deletion. |
 
@@ -177,7 +174,7 @@ For data-changing tests compare database rows, summed quantities, per-finish pri
 | IO-06 | P1 U/I | Import blank/nonnumeric/zero/negative quantity and malformed currency. | Documented current fallback applies: quantity at least 1/default 1 and unparseable price 0; no crash. |
 | IO-07 | P1 I | Upload no file, empty filename, non-CSV file, empty CSV, UTF-8/BOM CSV, quoted commas/newlines. | Upload validation is clear; valid CSV escaping is preserved; encoding/header failures are visible. |
 | IO-08 | P0 I | Fail during a replace import or run two uploads with same filename/time. | No silent loss from partial replacement or upload collisions; report failures and verify recovery. |
-| IO-09 | P1 E/I | Export MTG Moxfield format across finishes/conditions; try it for Pokémon and unknown format. | Supported output follows game exporter; unsupported formats fail clearly without mutation. |
+| IO-09 | P1 E/I | Export MTG Moxfield format across finishes/conditions; try it for a game without that exporter and for an unknown format. | Supported output follows game exporter; unsupported formats fail clearly without mutation. |
 | IO-10 | P1 E | Download empty/nonempty exports. | Valid filename/content type and readable headers/output; downloading does not change data. |
 
 ## 9. Deck management, search, ownership, and rules
@@ -251,7 +248,7 @@ For data-changing tests compare database rows, summed quantities, per-finish pri
 | BACKUP-05 | P1 I | Restore older schema backup after adding columns. | Shared columns restore; new columns retain defaults; valid foreign associations survive. |
 | BACKUP-06 | P0 I | Inject write/space/lock failure during create and during each restore stage. | No incomplete backup is listed; partial restore is explicitly reported with prior-state backup available. |
 | BACKUP-07 | P1 I/E | Delete/cancel deletion; use missing/corrupt/traversal backup IDs. | Cancel preserves backup; valid deletion affects only that backup; invalid IDs fail safely; corrupt entries do not break list. |
-| BACKUP-08 | P1 I | Make more than five automatic backups and several manual backups. | Only newest five automatic backups remain; manual backups persist until explicitly deleted. |
+| BACKUP-08 **(automated)** | P1 I | Make more than five automatic backups and several manual backups. | Only newest five automatic backups remain; manual backups persist until explicitly deleted. |
 | BACKUP-09 | P0 I | Change settings/card data/review after snapshot, then restore. | Collection backup restores its documented scope; settings, downloaded card data, and review queue are not rolled back. |
 | BACKUP-10 | P1 I | Simulate unsupported hard links and absent capture file during create/restore. | Copy fallback works; missing images do not invalidate unaffected inventory; restoration limitations are visible. |
 
@@ -280,7 +277,7 @@ For data-changing tests compare database rows, summed quantities, per-finish pri
 
 | ID | Priority / layer | Setup and steps | Expected result |
 |---|---|---|---|
-| DATA-01 | P0 I | Download initial MTG/Pokémon data with progress stubs. | Searchable counts/details/indexes initialize; deck fields are available for supported MTG data. |
+| DATA-01 | P0 I | Download each game's initial data with progress stubs. | Searchable counts/details/indexes initialize; deck fields are available for supported MTG data. |
 | DATA-02 | P0 I | Update existing data successfully; fail download/parse/write mid-update. | Success replaces data coherently; failure retains usable previous data and collection/decks. |
 | DATA-03 | P1 I/E | Run scheduled/startup update check with newer/no-change/unavailable source. | New-data notice is accurate; unavailable check does not prevent app startup. |
 | DATA-04 | P1 I/E | Start update repeatedly and rebuild while update is active. | Conflicting jobs are prevented or serialized; progress/completion reflects actual operation. |
@@ -313,9 +310,40 @@ For data-changing tests compare database rows, summed quantities, per-finish pri
 | LOAD-02 | P0 I/H | Scan a counted stack of 100 cards with repeated/ambiguous copies and delayed AI. | Captured = added + unresolved review + explicitly skipped/failed work; no unexplained losses or duplicate copies. |
 | LOAD-03 | P2 I/H | Run a prolonged scan session with trace, price fetches, and repeated review. | Memory, worker count, disk use, and queue latency stay within measured deployment budgets. |
 
+## 16. Server, camera stations, and the phone
+
+Checked while this was built (2026-10-08 / 09) are marked **done**, with what was measured in
+PROGRAM_DOCUMENTATION.md (Stations) and INSTALL.md; **(automated)** is in `tests/test_ownership.py`.
+
+| ID | Priority / layer | Setup and steps | Expected result |
+|---|---|---|---|
+| STN-01 | P0 I/H | Start a camera station against a server without a camera. | It appears on `/` and its page shows the live view; the camera settings come from the server. **done** (laptop, Raspberry Pi 5) |
+| STN-02 | P0 H | Auto scanning on a station: drop a counted pile, including identical copies in a row. | Captures = cards dropped; each added once or in that station's review queue. **done** for 17-18 cards (one count was off by one, cause not established) |
+| STN-03 | P0 I/H | Manual capture, and auto scanning with "Add cards automatically" off. | The card is shown on that station's page and waits; the station holds its next capture until Add / Skip. **done** |
+| STN-04 | P1 H | From the page: Refocus, fixed area (draw / use detected / off), rotation, focus check interval, detection off / on; an invalid rotation. | Each runs on the station and is saved for that station only; the invalid value gives the error text. **done** |
+| STN-05 | P0 I | Stop the server with a capture waiting on the station; start it again. | The capture is sent once the server is back - one card. **done** (12 s outage) |
+| STN-06 | P0 I | Send the same `capture_id` twice; kill the server with captures queued and restart. | One card per id; every accepted capture is added or in review after the restart (at least once: see the documentation). **done** |
+| STN-07 | P1 I | Restart the server while a station is connected; stop the station. | The station reconnects by itself; its page says "No camera station connected" while it is away. **done** |
+| STN-08 | P1 H | Unplug the webcam while the station runs; plug it back in (also under another `/dev/videoN`). | The page says "No camera"; the live view returns without a restart (by-id name), or after one. Not tested |
+| STN-09 | P1 I | Set a station token; connect and upload without it, with a wrong one, with the right one. | 401 / refused connection without the right token. **done** for uploads; not tested with the camera client |
+| STN-10 | P0 I/E | Two stations scanning at once, each with its page open. | Each page receives only its own station's cards, log lines, review items and counts. **done** (one camera station and one uploader) |
+| STN-11 | P1 I | Per-station settings: change location, add automatically, focus check on one station. | The other stations and `settings.json` are unchanged; a new station starts from the shared values. **done** |
+| STN-12 | P0 I | Scanned list with a camera chosen: list, count, Add to collection, Clear (cards and review items). | Only that camera's copies and captures are shown / moved / deleted; the others' stay; the other cameras' Undo still works. **done**, **(automated)** for the inventory side |
+| STN-13 | P0 I | Two stations scan the same printing into the same location; filter, edit, split, merge. | One entry; each camera's list shows its copies; a shared entry can't be edited from a filtered list; ownership follows splits and merges. **(automated)** |
+| STN-14 | P0 I | Crash between the two commits of a one-camera "Add to collection"; restart. | The move is finished for that camera only: nothing twice, nothing lost. **done** (simulated on copies) |
+| STN-15 | P0 I | Back up, change which station owns what, restore; restore a backup from before stations; restore the oldest automatic backup. | Ownership is as in the backup (none for an old one); the backup being restored is not deleted. **(automated)** |
+| STN-16 | P1 I/E | Forget a station that has scanned cards and review items; let it connect again. | Its scanned cards and review items are removed, the collection is untouched; it comes back empty. **done** through the API |
+| STN-17 | P1 E | The cameras page, a station's page, a capture-only station's page; Settings → Stations (rename, location, Undo last, Forget). | Pages render with the right panels; the buttons act on the station named. Rendering **done**; the buttons not clicked in a browser |
+| STN-18 | P1 I | Client image: build for x86-64 and ARM64; start with no camera, with a camera by number and by `by-id` path. | The image builds and the station connects; without a camera it says so and waits. **done** |
+| PHONE-01 | P0 H | Phone in client mode: manual capture of a real card; Undo; auto mode over a pile. | Added on the server and shown on the phone; Undo removes it; the pile is counted. **done** (Pixel 10; auto mode: 16 cards) |
+| PHONE-02 | P0 H | Phone with the network off: capture several cards, close the app, restore the network, open it. | Every capture reaches the server once. **done** on the emulator; not on a phone |
+| PHONE-03 | P1 I | Export the phone's CSV (standalone) and import it on the collection page. | Every entry arrives with its printing id and set code. **done** with 102 entries |
+| OCR-01 | P1 I | Server image with and without an NVIDIA GPU. | `ai.log` says `light-ocr ready (webgpu)` / `(cpu)`; the same reads either way. **done** |
+| LOAD-04 | P1 I | Four stations at a card every 0.5 s each; AI requests 1, 2, 3 and 6 at a time. | All cards settled; throughput as documented. **done** |
+
 ## Suggested execution order and automation
 
-1. **Smoke:** BOOT-01, GAME-01, CAM-01, SCAN-01, READ-12, SCAN-08, REVIEW-03, TRANSFER-02, INV-04, IO-01, DECK-01, BACKUP-03.
+1. **Smoke:** BOOT-01, STN-01, CAM-01, SCAN-01, READ-12, SCAN-08, STN-02, REVIEW-03, TRANSFER-02, STN-12, INV-04, IO-01, DECK-01, BACKUP-03.
 2. **Data integrity gate:** remaining P0 cases, with before/after database snapshots and distinguishable capture files.
 3. **Feature regression:** P1 cases, parameterized across supported games, finishes, areas, and formats where applicable.
 4. **Hardware/usability:** camera cases on USB and Pi hardware, browser/mobile coverage, then P2 and workload measurements.

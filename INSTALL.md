@@ -1,266 +1,264 @@
-# Deployment Guide
+# Installation
 
-The scanner is deployed with `scripts/deploy.sh`, run **on the machine that runs the scanner**
-(a Raspberry Pi or any Linux PC). The same script installs, repairs and updates it, and can set
-it up as a service that starts on boot.
+The scanner has three parts. Install the server once, then as many cameras as you like:
 
-## Raspberry Pi, from scratch
+| Part | Where | How |
+|---|---|---|
+| [Server](#1-the-server) | One Linux machine (it can be the one running Ollama) | Docker |
+| [Camera station](#2-a-camera-station) | Each machine with a USB webcam: a PC, a laptop, a Raspberry Pi | Docker, or Python |
+| [Phone](#3-a-phone-as-a-station) | An Android phone | The app |
 
-1. **Flash the SD card** with [Raspberry Pi Imager](https://www.raspberrypi.com/software/):
-   *Raspberry Pi OS Lite (64-bit)*. In the imager's settings, set a hostname (e.g. `scanner`),
-   your user and Wi-Fi, and enable SSH.
-2. **Connect the camera** (USB webcam, or the camera module to the CSI port) and boot the Pi.
-3. **Log in and install:**
+There is also a way to run [everything on one machine](#everything-on-one-machine-without-docker)
+without Docker, as the scanner this project grew from.
 
-   ```bash
-   ssh <user>@scanner.local
-   sudo apt install -y git
-   git clone https://github.com/filipesibinel/scanner.git
-   cd scanner
-   ./scripts/deploy.sh                 # lists the cameras it finds
-   ./scripts/deploy.sh --camera 0 --service      # USB camera /dev/video0, as a service
-   # or: ./scripts/deploy.sh --picamera --service   # Raspberry Pi camera module
-   ```
+## 1. The server
 
-4. **Set up the vision AI** (see below), then restart: `sudo systemctl restart mtg-scanner`.
-5. **Open** `http://scanner.local:5000` from any device on your network.
-
-A Raspberry Pi 4 or 5 handles the camera, card detection and web interface easily. The card
-identification runs on a cloud AI (Gemini, OpenAI or Anthropic) or on a local model server on a
-more powerful computer (e.g. Ollama with a vision model on your desktop) - a Pi is too slow to
-run a vision model itself.
-
-## Any Linux PC
-
-```bash
-git clone https://github.com/filipesibinel/scanner.git
-cd scanner
-./scripts/deploy.sh                # add --service to start it on boot
-venv/bin/python app.py             # if you didn't install the service
-```
-
-The script supports apt (Debian, Ubuntu, Raspberry Pi OS), pacman (Arch), dnf (Fedora) and
-zypper (openSUSE) for the few system packages it needs.
-
-## Server in Docker
-
-The server (web app, card data, OCR reader, AI requests) runs as a container on any x86-64
-Linux machine with Docker - no camera needed there. Files: `Dockerfile` (target `server`),
-`docker-compose.yml`, `docker-compose.gpu.yml`, `scripts/docker-entrypoint.sh`.
+The server (web pages, card data, OCR reader, AI requests, your collection) runs as a container
+on an x86-64 Linux machine with Docker and the Compose plugin. It needs no camera.
 
 ```bash
 git clone https://github.com/filipesibinel/scanner-server.git && cd scanner-server
 mkdir -p data scanned_cards        # before the first start, so they belong to you, not root
 docker compose up -d --build
-docker compose logs -f             # the first start downloads the card database (a few minutes)
+docker compose logs -f             # the first start downloads the card data (about 150 MB)
 ```
 
-Then open `http://<server>:5000`. Stop with `docker compose stop` (the app closes its databases,
-like Ctrl+C).
+Then open `http://<server>:5000`: an empty list of cameras, and **Collection**. Stop with
+`docker compose stop` (the app closes its databases, like Ctrl+C).
 
-- **Your data** is in `data/` (collection, scanned cards, settings, API keys entered in
-  Settings, backups, logs) and `scanned_cards/` (captured images), next to the compose file.
-  To move an existing installation, stop both, copy its `data/` here and start the container.
+Files: `Dockerfile` (target `server`), `docker-compose.yml`, `docker-compose.gpu.yml`,
+`scripts/docker-entrypoint.sh`.
+
+- **Your data** is in `data/` (card data, collection, scanned cards, decks, settings, the
+  stations, API keys entered in Settings, backups, logs) and `scanned_cards/` (capture images as
+  uploaded), next to the compose file. Nothing else needs keeping.
 - **Another user id**: the container runs as 1000:1000, the owner the two folders must have.
-  Set `SCANNER_UID` / `SCANNER_GID` in `.env` if yours differ; `SCANNER_PORT` changes the port.
-- **API keys**: in Settings, or in `.env` beside the compose file (see `.env.example`).
+  Set `SCANNER_UID` / `SCANNER_GID` in `.env` beside the compose file if yours differ;
+  `SCANNER_PORT` changes the port.
+- **Firewall**: the stations and your browser must reach the port (5000). Ports published by
+  Docker usually bypass `ufw`.
+
+### Vision AI
+
+Open any camera's page (or, before a camera exists, enter the keys in `.env`) and choose the
+provider in **Settings → Vision AI**. It is one choice for all cameras, remembered on the
+server.
+
+- **Cloud**: pick the provider and paste the API key into the field that appears - it is saved
+  to `data/api_keys.env` and used right away. Or put `GEMINI_API_KEY=...`, `OPENAI_API_KEY=...`
+  / `ANTHROPIC_API_KEY=...` in `.env` beside the compose file (see `.env.example`) and run
+  `docker compose up -d` again.
 - **Ollama on the same machine**: the container reaches it as `host.docker.internal:11434`
   (the default `LOCAL_AI_ENDPOINT`). Ollama must listen on more than 127.0.0.1
-  (`OLLAMA_HOST=0.0.0.0`) and a firewall must let the Docker network reach port 11434. For
-  Ollama elsewhere, set `LOCAL_AI_ENDPOINT=http://<host>:11434/v1/chat/completions` in `.env`.
-- **OCR on an NVIDIA GPU** (needs the NVIDIA Container Toolkit):
+  (`OLLAMA_HOST=0.0.0.0`) and a firewall must let the Docker network reach port 11434. Pick
+  *Local* and a vision model in Settings.
+- **Ollama elsewhere**: set `LOCAL_AI_ENDPOINT=http://<host>:11434/v1/chat/completions` in
+  `.env`.
 
-  ```bash
-  docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
-  ```
+Without any AI the server still reads most cards with OCR; the ones OCR can't confirm go to
+the review queue.
 
-  `data/logs/ai.log` then says `light-ocr ready (webgpu)` instead of `(cpu)`. Measured on an
-  RTX 4070 Ti SUPER: 0.10 s per card, against 0.67 s on 4 cores of a Ryzen 7 7800X3D.
-- **Updating**: `git pull`, then the same `up -d --build` command.
+### OCR on an NVIDIA GPU
 
-## Camera station
+Optional: OCR takes 0.10 s per card on a GPU instead of 0.67 s on the CPU (measured: RTX 4070
+Ti SUPER against 4 cores of a Ryzen 7 7800X3D). It needs the
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+on the host.
 
-The camera runs on another machine than the server - any Linux PC or laptop with the USB
-webcam - as `station_client.py`. It finds, captures and focuses on the cards (the same code as
-the scanner always used) and sends each captured card to the server; the server's scanner page
-shows its live view and controls it. The server must run with `camera.type: remote` (the
-Docker image does: `SCANNER_CAMERA=remote`).
+```bash
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+```
+
+`data/logs/ai.log` then says `light-ocr ready (webgpu)` instead of `(cpu)`. Use the same two
+`-f` options for every later `docker compose` command.
+
+### Moving an existing collection in
+
+From the single-machine scanner (or another server): stop both, copy its `data/` folder -
+`cards_database.db`, `scan_inventory.db`, `settings.json`, `captures/`, `review/`, `backups/` -
+into the server's `data/`, and start the server. It adds what is new to the database at
+startup and makes a backup of the day. Check the card and deck counts on the collection page
+against the old installation before deleting anything there.
+
+From the Android app working on its own: its **CSV** export is the server's own format - import
+it on the collection page.
+
+## 2. A camera station
+
+A camera station is a Linux machine with a USB webcam: x86-64 or ARM64, a Raspberry Pi 5 is
+tested. It runs `station_client.py`, which finds, captures and focuses on the cards and sends
+each one to the server. It keeps nothing - its settings (focus, rotation, fixed area) are
+saved on the server - and it has no interface of its own: you use its page on the server.
+
+A webcam with a manual focus control (`v4l2-ctl --list-ctrls` shows `focus_absolute`) lets the
+scanner lock the focus; others keep their own autofocus.
+
+### With Docker
 
 ```bash
 git clone https://github.com/filipesibinel/scanner-server.git && cd scanner-server
-python3 -m venv venv && venv/bin/pip install -r requirements-client.txt
-sudo apt install v4l-utils           # v4l2-ctl: focus control (pacman -S v4l-utils, ...)
-venv/bin/python station_client.py --server http://<server>:5000
-```
-
-- **Which camera**: `camera.usb_index` in `config.yaml` (`v4l2-ctl --list-devices`), or
-  `SCANNER_CAMERA_INDEX`: a number, or the camera's `/dev/v4l/by-id/...-video-index0` path, which
-  stays the same camera when the numbers change.
-- **Options**: `--id` (default: the machine's name), `--name` (shown on the server), `--token`
-  (when the server has a station token) - or `SCANNER_SERVER`, `SCANNER_STATION_ID`,
-  `SCANNER_STATION_NAME`, `SCANNER_STATION_TOKEN`.
-- **Nothing is kept on the station**: focus position, rotation and fixed area are saved on the
-  server; a captured image is deleted once the server has it.
-- **Server or network down**: the station keeps scanning, and the captures wait and are sent
-  when the server is back. Without a server at startup it waits for one (the camera's settings
-  come from there).
-- **Several cameras**: start it on each camera's machine with its own `--id`. Each gets its
-  own page on the server, `http://<server>:5000/scan/<id>`, with its live view, its cards and
-  its review queue; `http://<server>:5000/` lists them.
-
-### Camera station in Docker
-
-The same station as a container (`Dockerfile` target `client`, `docker-compose.client.yml`),
-for a USB webcam on any x86-64 or ARM64 Linux machine with Docker. Put its settings in `.env`
-beside the compose file:
-
-```
+ls /dev/v4l/by-id/                 # find your camera: ...-video-index0
+cat > .env <<'END'
 SCANNER_SERVER=http://<server>:5000
 SCANNER_CAMERA_INDEX=/dev/v4l/by-id/<your camera>-video-index0
 SCANNER_STATION_NAME=Desk camera
-```
-
-```bash
+END
 docker compose -f docker-compose.client.yml up -d --build
 docker compose -f docker-compose.client.yml logs -f
 ```
 
-- The container gets the host's `/dev` with access to video devices only, so the camera can
-  be unplugged and plugged in again without restarting it (a camera named by number may come
-  back under another number - name it by its `by-id` path).
-- The station id defaults to the machine's name (`SCANNER_STATION_ID` to choose one).
-- Nothing is kept in the container: it can be removed and rebuilt at any time.
-- A Raspberry Pi camera module is not supported in the container (its software comes from
-  Raspberry Pi OS packages); use a USB webcam, or run `station_client.py` directly.
+The station appears on the server's start page; its page is `http://<server>:5000/scan/<id>`.
+It starts again by itself after a reboot.
 
-Measured 2026-10-08 on a laptop (Ryzen 5 7235HS, Anker C200): image 510 MB, ~28% of one core,
-66 MB; live view 12 fps; a manual capture and a focus sweep asked from the server's page worked.
-
-Measured 2026-10-09 on a Raspberry Pi 5 (8 GB, Raspberry Pi OS / Debian 13, 64-bit, the same
-Anker C200, Wi-Fi): the ARM64 image builds there in 37 s; ~50% of one core - about half of what
-the capture loop may use, so it keeps the 20 frames a second - 68 °C without throttling; live
-view 11.6 fps; a manual capture read by the server's OCR, and a focus sweep asked from the
-server's page (locked at 424, saved on the server).
-
-Not tested: unplugging the camera while it runs; dropping cards one after another on the Pi.
-
-## What the script does
-
-Each step is skipped when it's already done, so it's safe to run again at any time:
-
-1. **Update** (with `--update`): `git pull`, keeping your local changes (e.g. the camera
-   number in `config.yaml`).
-2. **System packages**: installs what's missing - Python venv support, `v4l-utils` (camera
-   focus/zoom controls) and, with `--picamera`, `python3-picamera2`. Uses `sudo` only here and
-   for the service.
-3. **Python environment**: creates `venv/` with Python 3.10+ and installs `requirements.txt`
-   (about 300 MB).
-4. **OCR reader** (optional): if Node.js 22+ with npm is installed, installs
-   [light-ocr](https://github.com/arcships/light-ocr) into `ocr/` (about 130 MB), which reads
-   most cards without an AI request. Without Node.js this step is skipped and every card goes
-   to the vision AI; install Node.js and run the script again to add it later.
-5. **Configuration**: creates `.env` from `.env.example` (readable only by you), sets the camera
-   with `--camera N`, and checks that an API key is set for your AI provider.
-6. **Camera**: checks the configured camera and lists all cameras found.
-7. **Card database**: downloads it from Scryfall if missing (`--refresh-cards` downloads the
-   latest cards and prices). Your inventory is kept.
-8. **Service** (with `--service`): installs `/etc/systemd/system/mtg-scanner.service` for your
-   user and folder, enables it and (re)starts it. If the service is already installed, each run
-   restarts it so new code and packages are used - except a plain `--refresh-cards`, since the
-   running scanner reads new card data directly.
-
-### Options
-
-| Option | What it does |
+| Setting | |
 |---|---|
-| `--service` | Install and start the systemd service (starts on boot) |
-| `--remove-service` | Stop and remove the service (your data is kept) |
-| `--update` | Pull the latest code first, then update packages and restart the service |
-| `--camera N` | Use USB camera `/dev/videoN` (sets `camera.usb_index` in `config.yaml`) |
-| `--picamera` | Raspberry Pi camera module |
-| `--skip-database` | Don't download the card database |
-| `--refresh-cards` | Re-download the card database (latest cards and prices) |
+| `SCANNER_SERVER` | The server's address (needed) |
+| `SCANNER_CAMERA_INDEX` | The camera: `N` of `/dev/videoN`, or its `/dev/v4l/by-id/...` path - that one stays the same camera when the numbers change. Default: `camera.usb_index` in `config.yaml` |
+| `SCANNER_STATION_ID` | 1-40 letters, digits, `-` or `_`. Default: the machine's name. It is how the server knows the station: keep it, or the station appears as a new one |
+| `SCANNER_STATION_NAME` | Shown on the server (it can be renamed there) |
+| `SCANNER_STATION_TOKEN` | The server's station token, when it has one |
 
-## Vision AI
+- The container gets the host's `/dev` with access to video devices only, so the camera can
+  be unplugged and plugged in again without restarting it. Unplugging while it runs has not
+  been tested; restart the container if the camera does not come back.
+- Nothing is kept in the container: it can be removed and rebuilt at any time.
+- Files: `Dockerfile` (target `client`), `docker-compose.client.yml`,
+  `requirements-client.txt`. The image is about 510 MB.
 
-Pick the provider in the web interface (**Settings → Vision AI**); the choice is remembered.
-
-- **Cloud**: pick the provider in Settings and paste the API key into the field that appears -
-  it's saved to `data/api_keys.env` and used right away. (Or put `GEMINI_API_KEY=...`,
-  `OPENAI_API_KEY=...` / `ANTHROPIC_API_KEY=...` in `.env` and restart.)
-- **Local (Ollama)**: pick *Local*, enter your server's address, e.g.
-  `http://192.168.1.20:11434/v1/chat/completions` (or set `vision_ai.local.endpoint` in
-  `config.yaml`), and pick a vision model. On the
-  Ollama machine, make it listen on the network (`OLLAMA_HOST=0.0.0.0`).
-
-## Deploying from your computer
-
-Everything can be driven over SSH (`-t` lets `sudo` ask for your password):
+### Without Docker
 
 ```bash
-ssh -t <user>@scanner.local 'cd scanner && ./scripts/deploy.sh --update'
+git clone https://github.com/filipesibinel/scanner-server.git && cd scanner-server
+python3 -m venv venv && venv/bin/pip install -r requirements-client.txt
+sudo apt install v4l-utils         # v4l2-ctl: focus control (pacman -S v4l-utils, ...)
+venv/bin/python station_client.py --server http://<server>:5000
 ```
+
+Options `--id`, `--name`, `--token`, or the environment variables above. Your user needs
+access to the camera (`sudo usermod -aG video $USER`, then log out and in).
+
+### On a Raspberry Pi
+
+Raspberry Pi OS (64-bit) with Docker, and the steps above. Measured on a Pi 5 (8 GB) with an
+Anker PowerConf C200 on Wi-Fi: the image builds there in 37 s; about half a core idle and 70%
+while scanning, 75 °C without throttling; 1.6 s per card over a pile.
+
+A Raspberry Pi **camera module** is not supported in the container (its software comes from
+Raspberry Pi OS packages) and has no focus control here; that path has not been run. Use a USB
+webcam.
+
+### When something is away
+
+- **No server at startup**: the station waits for it (its camera settings come from there).
+- **Server or network down while scanning**: the station keeps scanning; the captures wait
+  and are sent when the server is back. A capture sent twice is one card.
+- **No camera**: the station says so on its page and picks the camera up when it is plugged in.
+
+### A station token
+
+Without one, any program on your network can send cards to the server. To require a token,
+set it on the server - `SCANNER_STATION_TOKEN=<something long>` in its `.env`, then
+`docker compose up -d` - and give every station the same value (`SCANNER_STATION_TOKEN`, or
+the field in the phone app's Settings).
+
+## 3. A phone as a station
+
+Install the Android app ([mtg-scanner-android](https://github.com/filipesibinel/mtg-scanner-android),
+built from its repository). In its Settings turn on **Send cards to a scanner server** and
+enter the server's address (`http://<server>:5000`); **Test connection** checks it. The phone
+then finds and captures the cards and the server does the rest. The phone's name and token
+are set in the same place.
+
+The phone shows its own camera and each card's result; its page on the server
+(*Cards and review on the server* in the app) has its scanned cards and review queue. Without
+a connection it keeps capturing and sends the cards when it is back, also after the app was
+closed. With the switch off the app works on its own, with its own AI settings and inventory.
 
 ## Updating
 
-```bash
-./scripts/deploy.sh --update            # new code + packages, restarts the service
-./scripts/deploy.sh --refresh-cards     # new cards and prices from Scryfall
-```
-
-The card database can also be refreshed from the web interface (**Settings → Update card
-database**). To refresh it automatically every Monday at 4:00, add this with `crontab -e`:
-
-```
-0 4 * * 1 cd $HOME/scanner && ./scripts/deploy.sh --refresh-cards >> data/logs/refresh.log 2>&1
-```
-
-## Running the service
+On the server, then on each camera station:
 
 ```bash
-sudo systemctl status mtg-scanner       # is it running?
-sudo systemctl restart mtg-scanner      # after changing config.yaml or .env
-journalctl -u mtg-scanner -f            # live logs (the app also writes data/logs/)
+git pull
+docker compose up -d --build                                # server (add the GPU file if you use it)
+docker compose -f docker-compose.client.yml up -d --build   # camera station
 ```
 
-The service runs as your user with a read-only view of the system and your home folder, except
-`data/` and `scanned_cards/` in the project, and gets camera access through the `video` group.
-It restarts after a crash, but not after a normal exit (for example when the card database is
-missing - see the logs).
+Update the server first: a station reconnects by itself a few seconds after the server is
+back, and scanning continues. Card data is updated from the web interface (**Settings → Update
+card database**, or the Database counter when it shows a dot).
 
 ## Backups
 
-For your cards alone - the collection, the scanned cards and the decks - the collection page's
-Settings (gear button) makes and restores backups in `data/backups/`.
+- **Your cards** - the collection, the scanned cards and the decks: the collection page's
+  Settings (gear button) makes and restores backups in `data/backups/`. One is made
+  automatically the first time the server starts each day (the last 7 are kept).
+- **Everything** - card data, settings, stations, API keys, review queue: stop the server and
+  copy its `data/` folder.
 
-`scripts/backup.sh` archives `data/` (card database, inventory, settings), the scanned images
-and `.env` to `~/scanner-backups/`, keeping the last 10. It can run while the app does (the
-databases are archived as consistent snapshots); if anything fails it says so, makes no
-backup and keeps the older ones. Your inventory lives in
-`data/cards_database.db`.
+## Everything on one machine, without Docker
 
-## Uninstalling
+The server can open a camera itself, as the single-machine scanner did. `scripts/deploy.sh`
+installs that on a Linux PC (apt, pacman, dnf, zypper):
 
 ```bash
-./scripts/deploy.sh --remove-service    # if you installed the service
-rm -rf ~/scanner                         # removes everything, including your inventory
+git clone https://github.com/filipesibinel/scanner-server.git && cd scanner-server
+./scripts/deploy.sh                # packages, venv, .env, camera check, OCR reader, card data
+./scripts/deploy.sh --camera 2     # use /dev/video2
+venv/bin/python app.py             # or: ./scripts/deploy.sh --service (starts on boot)
+```
+
+`http://localhost:5000` is then that camera's scanner page, and other stations can still
+connect to it. With `camera.type: remote` in `config.yaml` it runs as a server without a
+camera, like the Docker image.
+
+| Option | What it does |
+|---|---|
+| `--service` / `--remove-service` | Install and start / stop and remove the systemd service `mtg-scanner` (your data is kept) |
+| `--update` | Pull the latest code first, then update packages and restart the service |
+| `--camera N` | Use USB camera `/dev/videoN` (sets `camera.usb_index` in `config.yaml`) |
+| `--picamera` | Raspberry Pi camera module (untested here) |
+| `--skip-database` / `--refresh-cards` | Don't download the card data / download the latest |
+
+The script is safe to run again: each step is skipped when it is already done. It installs
+[light-ocr](https://github.com/arcships/light-ocr) into `ocr/` when Node.js 22+ with npm is
+there (it needs glibc 2.38 or newer - Debian 13, Ubuntu 24.04); without it every card goes to
+the vision AI. `scripts/backup.sh` archives `data/`, the capture images and `.env` to
+`~/scanner-backups/`, and `scripts/start.sh` starts the app after checking the key and the
+card data.
+
+```bash
+sudo systemctl status mtg-scanner       # is it running?
+journalctl -u mtg-scanner -f            # live logs (the app also writes data/logs/)
 ```
 
 ## Troubleshooting
 
-**The camera isn't found** - `v4l2-ctl --list-devices` lists the cameras; pick one with
-`./scripts/deploy.sh --camera N`. Only one program can use the camera at a time, so stop other
-instances (a manual `python app.py` and the service can't run together).
+**The station's page says "No camera station connected"** - the station isn't running, or
+can't reach the server: check `SCANNER_SERVER` and the log on the station
+(`docker compose -f docker-compose.client.yml logs`). It keeps trying.
 
-**Permission denied on /dev/video0 (manual runs)** - add your user to the `video` group:
-`sudo usermod -aG video $USER`, then log out and in. The service has access either way.
+**The station is refused** - "wrong or missing station token" in the server's log: give the
+station the server's token.
 
-**Port 5000 is in use** - another instance is running (`sudo systemctl stop mtg-scanner`), or
-change `flask.port` in `config.yaml`.
+**"No camera found" on the station** - `v4l2-ctl --list-devices` lists the cameras; set
+`SCANNER_CAMERA_INDEX`. Only one program can use a camera at a time.
 
-**The service doesn't start** - `journalctl -u mtg-scanner -n 50` shows the error.
+**Permission denied on /dev/video0 (without Docker)** - add your user to the `video` group:
+`sudo usermod -aG video $USER`, then log out and in.
 
-**"Vision AI disabled"** - no API key for the selected provider: check `.env`, or switch to a
-local model in Settings.
+**Port 5000 is in use on the server** - set `SCANNER_PORT` in `.env` (stations then use that
+port in `SCANNER_SERVER`).
 
-**Package installation fails** - run the script again (it resumes).
+**OCR runs on the CPU although there is a GPU** - `data/logs/ai.log` says `light-ocr ready
+(cpu)`: start the server with the GPU compose file, and check `nvidia-smi` works on the host
+and `docker info` lists the `nvidia` runtime.
+
+**OCR did not start** - `data/logs/ocr.log` has the reason. Outside Docker it is usually an
+older system library (light-ocr needs glibc 2.38) or a missing `npm install` in `ocr/`.
+
+**"Vision AI disabled"** - no API key for the selected provider: enter one in Settings, or
+switch to a local model.
+
+**The server doesn't start** - `docker compose logs` shows why. With an empty `data/` it
+first downloads the card data; without internet it stops there.
