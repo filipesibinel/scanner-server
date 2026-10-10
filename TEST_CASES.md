@@ -179,6 +179,7 @@ For data-changing tests compare database rows, summed quantities, per-finish pri
 | ID | Priority | Test | Expected |
 |---|---|---|---|
 | TRD-01 | P0 U/E | Tick entries, **Set aside for trade** with a new name; again with the same name in another case; with an entry that has no free copy. | One open trade; the cards stay in the inventory with a "Trade: name" badge and count in totals, statistics and decks; entries without a free copy are reported, not added. |
+| TRD-01a | P1 E | Press ⇄ on a list row with other rows ticked; on a row whose copies are all in a trade. | That card's free copies go into the named trade, the ticks stay; with none free a warning, nothing changes. |
 | TRD-02 | P0 U/I | Delete, lower below the held copies, bulk-delete, bulk-move, "Remove this batch", clear, and replace-import an entry a trade holds. | Each is refused with the sentence about the trade; nothing is half done (also not the other entries of a bulk action). The free copies and condition / tags can still be changed. |
 | TRD-03 | P1 U/E | On the Trades tab: − / + / × per card, two trades holding copies of one entry, rename to an open trade's name. | Quantities stay within what the entry has free; × leaves the card in the collection; the rename is refused. |
 | TRD-04 | P0 U/E | **Confirm trade**; press it twice (two tabs); make it fail part way. | The copies leave the collection once, with the newest photos; the trade moves to Confirmed trades with the cards as they were; a failure changes nothing. |

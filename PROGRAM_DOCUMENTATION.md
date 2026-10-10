@@ -1114,7 +1114,8 @@ Cards promised to someone stay in the collection until the trade has happened
 (`trades.py`: `Trades`, made on the collection's `InventoryManager` - its connection, its lock;
 tables in [Database](#database)). **Set aside for trade** on the bulk bar asks for a name
 (`POST /api/trades`, JSON `name`, `ids`): the open trade with that name, whatever the case, or
-a new one, takes every copy of the selected entries that no trade holds yet. Nothing in the
+a new one, takes every copy of the selected entries that no trade holds yet. A list row has
+the same as its own button (⇄, `setAsideForTrade(card)`), for one card without ticking it. Nothing in the
 inventory changes: the cards are still owned - totals, statistics and decks count them - and
 their rows get a **Trade: name** badge (`/api/inventory` gives each entry `trades`:
 `[{id, name, quantity}]`, `Trades.by_entry`); `trade:name` in the search field finds them.

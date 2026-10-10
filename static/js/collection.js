@@ -487,6 +487,7 @@ function listRowHtml(card) {
                 <div class="inventory-timestamp" title="Scanned ${escapeHtml(card.timestamp)}">Added ${card.added_quantity ? '' : 'before '}${escapeHtml(card.added_at.slice(0, 16))}${card.added_quantity && card.added_quantity < card.quantity ? ` (+${card.added_quantity})` : ''}</div>
             </div>
             <div class="inventory-card-actions">
+                <button class="btn-trade" title="Set aside for a trade: it stays in your collection until you confirm the trade"><svg class="icon"><use href="#i-swap"/></svg></button>
                 <button class="btn-edit" title="Edit"><svg class="icon"><use href="#i-edit"/></svg></button>
                 <button class="btn-delete" title="Delete"><svg class="icon"><use href="#i-trash"/></svg></button>
             </div>
@@ -1785,11 +1786,12 @@ function renderTrades() {
     document.querySelectorAll('#trades-done details').forEach(item => { item.open = unfolded.has(item.dataset.trade); });
 }
 
-async function setAsideForTrade() {
-    // Every free copy of the selected entries; how many of each is changed on the Trades tab
-    const ids = [...selected];
+async function setAsideForTrade(card = null) {
+    // Every free copy of the selected entries - or of one row's, from its own button; how many
+    // of each is changed on the Trades tab
+    const ids = card ? [card.id] : [...selected];
     const open = trades.filter(trade => trade.status === 'open').map(trade => trade.name);
-    const name = await valueDialog({title: `Set ${entriesText(ids.length)} aside for a trade`,
+    const name = await valueDialog({title: `Set ${card ? card.name : entriesText(ids.length)} aside for a trade`,
         label: open.length ? 'Trade (one of the open ones, or a new name)' : 'Name of the trade (who it is with)',
         options: open, value: open.length === 1 ? open[0] : ''});
     if (!name) return;
@@ -1797,7 +1799,7 @@ async function setAsideForTrade() {
     if (!data) return;
     notify(`${plural(data.cards, 'card')} set aside for "${data.name}"`
         + (data.skipped ? ` - ${entriesText(data.skipped)} had no copy left to give` : ''), data.cards ? 'success' : 'warning');
-    selected.clear();
+    if (!card) selected.clear();  // a row's button leaves what is ticked alone
     loadInventory();
     loadTrades();
 }
@@ -1941,6 +1943,7 @@ function bindInventoryEvents() {
         const row = event.target.closest('[data-id]');
         const card = rowCard(row);
         if (!card) return;
+        if (event.target.closest('.btn-trade')) return setAsideForTrade(card);
         if (event.target.closest('.btn-edit')) return editCard(card, knownLocations(), () => shown);
         // No question first: it can be undone
         if (event.target.closest('.btn-delete')) return changeLater([card.id], `Deleting ${card.name}`, {ids: [card.id], action: 'delete', value: ''});

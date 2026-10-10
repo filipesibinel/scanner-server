@@ -261,8 +261,8 @@ cards and to build decks. It works on a phone too.
 - **Preconstructed decks** - **View cards** shows what is in one without saving anything;
   **Create deck** there makes a deck list to change as you like; **I own
   it** also adds its cards to your inventory (the printings and foils that come in the box).
-- **Trades** - promised some cards to someone? Tick them and press **Set aside for trade**,
-  and give the trade a name. The cards stay in your collection, marked *Trade: name*, and
+- **Trades** - promised some cards to someone? Tick them and press **Set aside for trade**
+  (or, for one card, the ⇄ button on its row), and give the trade a name. The cards stay in your collection, marked *Trade: name*, and
   cannot be deleted or moved away by accident. On the **Trades** tab you see each open trade
   with its value, change how many copies go, and **Export** the list (Moxfield's format, or
   the app's own). **Confirm trade** when it has happened - only then do the cards leave your

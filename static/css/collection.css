@@ -216,6 +216,31 @@ a.btn {
     grid-template-columns: 20px 72px 1fr auto auto;
 }
 
+/* Set aside for a trade: beside the pencil and the bin, and like them */
+.btn-trade {
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.btn-trade .icon {
+    width: 15px;
+    height: 15px;
+}
+
+.btn-trade:hover {
+    border-color: var(--warning);
+    background: var(--warning-soft);
+    color: var(--warning);
+}
+
 /* The photo of the card, big enough to recognize it (the scanner's list keeps the small one) */
 .collection-list .inventory-thumb {
     width: 72px;
@@ -1044,6 +1069,12 @@ details.trade .trade-row {
     .collection-list .inventory-card {
         grid-template-columns: 20px 40px 1fr auto;
         gap: 10px;
+    }
+
+    /* Three buttons one above the other: the name needs the room */
+    .collection-list .inventory-card-actions {
+        flex-direction: column;
+        gap: 4px;
     }
 
     /* Narrow screens keep the small photo: the name needs the room */
