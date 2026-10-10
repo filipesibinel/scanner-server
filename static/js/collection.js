@@ -83,6 +83,7 @@ function showTab(tab) {
         }
     }
     if (tab === 'stats') renderStats();
+    if (tab === 'trades') loadTrades();
 }
 
 // ============================================================================
@@ -281,6 +282,8 @@ const SEARCH_FIELDS = {
     loc: (card, value) => (card.location || '').toLowerCase() === value,
     finish: (card, value) => [card.finish, finishLabel(card.finish)].some(finish => (finish || '').toLowerCase() === value),
     number: (card, value) => String(card.number || '').toLowerCase() === value,
+    // Set aside for a trade with this in its name; trade:"" = for any trade
+    trade: (card, value) => (card.trades || []).some(trade => trade.name.toLowerCase().includes(value)),
 };
 SEARCH_FIELDS.location = SEARCH_FIELDS.loc;
 
@@ -351,6 +354,8 @@ function badgesHtml(card) {
         ${card.finish !== defaultFinish() ? `<span class="inventory-badge ${escapeHtml(card.finish)}">${escapeHtml(finishLabel(card.finish).toUpperCase())}</span>` : ''}
         ${card.location ? `<span class="inventory-badge location" title="Location">${escapeHtml(card.location)}</span>` : ''}
         ${card.tags.map(tag => `<span class="inventory-badge tag" title="Tag">${escapeHtml(tag)}</span>`).join('')}
+        ${(card.trades || []).map(trade => `<span class="inventory-badge trade" title="Set aside for the trade &quot;${escapeHtml(trade.name)}&quot; - see the Trades tab">Trade: ${
+            escapeHtml(trade.name)}${trade.quantity < card.quantity ? ` ${trade.quantity}×` : ''}</span>`).join('')}
         ${card.decks.length ? `<span class="inventory-badge deck" title="Used in: ${escapeHtml(card.decks.join(', '))}">${
             escapeHtml(card.decks.length === 1 ? card.decks[0] : plural(card.decks.length, 'deck'))}</span>` : ''}`;
 }
@@ -529,6 +534,8 @@ async function bulkAction(action) {
         if (!value) return;
     } else if (action === 'deck') {
         return addSelectionToDeck();
+    } else if (action === 'trade') {
+        return setAsideForTrade();
     }
     const data = await api('/api/inventory/bulk', {method: 'POST', body: {ids, action, value}});
     if (!data) return;
@@ -1497,6 +1504,155 @@ async function backupAction(row, action) {
 }
 
 // ============================================================================
+// Trades: cards set aside until a trade is confirmed
+// ============================================================================
+
+let trades = [];   // open ones first, then the confirmed ones (GET /api/trades)
+
+async function loadTrades() {
+    const data = await api('/api/trades');
+    if (!data) return;
+    trades = data.trades;
+    renderTrades();
+}
+
+function tradeCardHtml(card, open) {
+    const where = [`${(card.set_code || card.set_name).toUpperCase()} ${card.number ? '#' + card.number : ''}`.trim(),
+                   card.finish !== defaultFinish() ? finishLabel(card.finish) : '', card.condition, card.location].filter(Boolean);
+    return `
+        <div class="trade-row" data-row="${card.row}">
+            <span class="trade-qty"><strong>${card.quantity}×</strong>${open && card.entry_quantity > card.quantity ? ` <span class="hint">of ${card.entry_quantity}</span>` : ''}</span>
+            <span class="trade-card"><span class="result-name">${escapeHtml(card.name)}</span> <span class="result-sub">${escapeHtml(where.join(' · '))}</span></span>
+            <span class="summary">${money(card.price * card.quantity)}</span>
+            ${open ? `<span class="trade-steps">
+                <button class="mini-btn" data-step="-1" title="One copy less" ${card.quantity < 2 ? 'disabled' : ''}>−</button>
+                <button class="mini-btn" data-step="1" title="One copy more" ${card.quantity >= card.most ? 'disabled' : ''}>+</button>
+                <button class="mini-btn" data-step="0" title="Take it out of the trade - it stays in your collection">×</button>
+            </span>` : ''}
+        </div>`;
+}
+
+function tradeHtml(trade) {
+    const open = trade.status === 'open';
+    const summary = `${plural(trade.quantity, 'card')} · <strong>${money(trade.value)}</strong> · `
+        + (open ? `since ${escapeHtml(trade.created_at.slice(0, 10))}` : `confirmed ${escapeHtml((trade.closed_at || '').slice(0, 10))}`);
+    const exports = `<select class="select trade-export" title="Download this trade's cards as a file for another site or app">
+        ${optionsHtml([['', 'Export…'], ...gameInfo.exports])}</select>`;
+    const cards = trade.cards.map(card => tradeCardHtml(card, open)).join('')
+        || '<div class="hint">No cards in this trade.</div>';
+    if (!open) {
+        return `
+            <details class="panel trade" data-trade="${trade.id}">
+                <summary><span class="trade-name">${escapeHtml(trade.name)}</span> <span class="summary">${summary}</span></summary>
+                <div class="trade-cards">${cards}</div>
+                <div class="filter-row trade-actions">
+                    <span class="spacer"></span>
+                    ${exports}
+                    <button class="btn btn-small btn-ghost" data-trade-action="forget" title="Take this trade out of the list - the cards are long gone">Delete from history</button>
+                </div>
+            </details>`;
+    }
+    return `
+        <div class="panel trade" data-trade="${trade.id}">
+            <div class="filter-row">
+                <span class="trade-name">${escapeHtml(trade.name)}</span>
+                <span class="summary">${summary}</span>
+                <span class="spacer"></span>
+                ${exports}
+                <button class="btn btn-small" data-trade-action="rename">Rename</button>
+                <button class="btn btn-small" data-trade-action="cancel" title="The trade is off: its cards simply stay in your collection">Cancel trade</button>
+                <button class="btn btn-small btn-primary" data-trade-action="confirm" title="The trade happened: remove its cards from your collection" ${trade.cards.length ? '' : 'disabled'}>Confirm trade</button>
+            </div>
+            <div class="trade-cards">${cards}</div>
+        </div>`;
+}
+
+function renderTrades() {
+    const open = trades.filter(trade => trade.status === 'open'), done = trades.filter(trade => trade.status !== 'open');
+    // Confirmed trades that were unfolded stay so when the list is drawn again
+    const unfolded = new Set([...document.querySelectorAll('#trades-done details[open]')].map(item => item.dataset.trade));
+    $('trades-open').innerHTML = open.map(tradeHtml).join('')
+        || '<div class="empty-state">No trade is open.</div>';
+    $('trades-done').innerHTML = done.map(tradeHtml).join('');
+    $('trades-done-title').hidden = !done.length;
+    document.querySelectorAll('#trades-done details').forEach(item => { item.open = unfolded.has(item.dataset.trade); });
+}
+
+async function setAsideForTrade() {
+    // Every free copy of the selected entries; how many of each is changed on the Trades tab
+    const ids = [...selected];
+    const open = trades.filter(trade => trade.status === 'open').map(trade => trade.name);
+    const name = await valueDialog({title: `Set ${entriesText(ids.length)} aside for a trade`,
+        label: open.length ? 'Trade (one of the open ones, or a new name)' : 'Name of the trade (who it is with)',
+        options: open, value: open.length === 1 ? open[0] : ''});
+    if (!name) return;
+    const data = await api('/api/trades', {method: 'POST', body: {name, ids}});
+    if (!data) return;
+    notify(`${plural(data.cards, 'card')} set aside for "${data.name}"`
+        + (data.skipped ? ` - ${entriesText(data.skipped)} had no copy left to give` : ''), data.cards ? 'success' : 'warning');
+    selected.clear();
+    loadInventory();
+    loadTrades();
+}
+
+async function tradeAction(trade, action) {
+    let request = null;
+    if (action === 'confirm') {
+        const ok = await confirmDialog({title: `Confirm the trade "${trade.name}"?`, confirmText: 'Confirm trade', danger: true,
+            message: `Its ${plural(trade.quantity, 'card')} (${money(trade.value)}) are removed from your collection. This can't be undone.`});
+        if (ok) request = api(`/api/trades/${trade.id}/confirm`, {method: 'POST'});
+    } else if (action === 'cancel') {
+        // Not confirmDialog: its "Cancel" beside "Cancel trade" says nothing
+        const ok = await choiceDialog({title: `Cancel the trade "${trade.name}"?`,
+            message: `Its ${plural(trade.quantity, 'card')} stay in your collection and are free again.`,
+            choices: [{label: 'Keep the trade', value: false}, {label: 'Cancel the trade', value: true, style: 'danger'}]});
+        if (ok === true) request = api(`/api/trades/${trade.id}`, {method: 'DELETE'});
+    } else if (action === 'forget') {
+        const ok = await confirmDialog({title: `Delete "${trade.name}" from the history?`, confirmText: 'Delete', danger: true,
+            message: 'Only the record of the trade goes; your collection is not changed.'});
+        if (ok) request = api(`/api/trades/${trade.id}`, {method: 'DELETE'});
+    } else if (action === 'rename') {
+        const name = await valueDialog({title: 'Rename the trade', label: 'Name', value: trade.name});
+        if (name) request = api(`/api/trades/${trade.id}`, {method: 'PUT', body: {name}});
+    }
+    if (!request) return;
+    const data = await request;
+    if (data && action === 'confirm') notify(`${plural(data.cards, 'card')} left your collection`, 'success');
+    loadTrades();
+    loadInventory();
+}
+
+function bindTradeEvents() {
+    $('tab-trades').addEventListener('click', async event => {
+        const panel = event.target.closest('[data-trade]');
+        const trade = panel && trades.find(item => item.id === parseInt(panel.dataset.trade));
+        if (!trade) return;
+        const action = event.target.closest('[data-trade-action]');
+        if (action) return tradeAction(trade, action.dataset.tradeAction);
+        const step = event.target.closest('[data-step]');
+        const row = event.target.closest('[data-row]');
+        const card = row && trade.cards.find(item => item.row === parseInt(row.dataset.row));
+        if (!step || !card) return;
+        const by = parseInt(step.dataset.step);
+        await api(`/api/trades/${trade.id}/cards/${card.row}`, {method: 'PUT', body: {quantity: by ? card.quantity + by : 0}});
+        loadTrades();
+        loadInventory();
+    });
+    $('tab-trades').addEventListener('change', event => {
+        // The server sends the file as a download; the menu goes back to "Export…"
+        const select = event.target.closest('.trade-export');
+        if (!select || !select.value) return;
+        const link = document.createElement('a');
+        link.href = `/api/trades/${select.closest('[data-trade]').dataset.trade}/export/${encodeURIComponent(select.value)}`;
+        link.download = '';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        select.value = '';
+    });
+}
+
+// ============================================================================
 // Events
 // ============================================================================
 
@@ -1783,6 +1939,7 @@ function bindEvents() {
     });
     bindDeckHomeEvents();
     bindBuilderEvents();
+    bindTradeEvents();
 
     // Card image preview (devices with a mouse)
     if (window.matchMedia('(hover: hover)').matches) {
@@ -1819,9 +1976,11 @@ function bindEvents() {
 }
 
 // The inventory changes while scanning on another tab or device
-['inventory_updated', 'inventory_undone', 'inventory_prices_updated'].forEach(name =>
+// (collection_updated: a trade changed - only this page listens)
+['inventory_updated', 'inventory_undone', 'inventory_prices_updated', 'collection_updated'].forEach(name =>
     socket.on(name, debounce(() => {
         loadInventory();
+        if (currentTab === 'trades') loadTrades();
         if (deck) api(`/api/decks/${deck.id}`).then(data => { if (data && deck) { deck = data.deck; renderDeck(); } });
     }, 500)));
 socket.on('game_changed', () => window.location.reload());
@@ -1848,6 +2007,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     bindEvents();
     await loadInventory();
     loadDecks();  // the location filter lists the decks' locations apart
+    loadTrades();  // "Set aside for trade" offers the open ones
     const tab = recall('collectionTab', 'inventory');
     showTab(tab === 'decks' && !gameInfo.deck_formats.length ? 'inventory' : tab);
 });

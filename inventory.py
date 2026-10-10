@@ -81,6 +81,43 @@ SOURCES_TABLE = '''
         PRIMARY KEY (inventory_id, station)
     )
 '''
+# Trades (trades.py; used in the collection only): cards set aside for one stay in the
+# collection until it is confirmed. An open trade's rows name the entry and how many of its
+# copies are set aside; a confirmed one ('done') keeps the cards as they were (card: the row
+# as JSON) and no entry. The triggers keep what an open trade holds: such an entry is not
+# deleted and not lowered below that, whatever part of the program tries - the copies are
+# taken out of the trade first. (Made again at every start: a rebuilt table loses its triggers.)
+TRADES_TABLE = '''
+    CREATE TABLE IF NOT EXISTS trades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        game TEXT NOT NULL,
+        name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done')),
+        created_at TEXT NOT NULL,
+        closed_at TEXT
+    )
+'''
+TRADE_CARDS_TABLE = '''
+    CREATE TABLE IF NOT EXISTS trade_cards (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trade_id INTEGER NOT NULL REFERENCES trades(id) ON DELETE CASCADE,
+        inventory_id INTEGER REFERENCES inventory(id),
+        quantity INTEGER NOT NULL CHECK (typeof(quantity) = 'integer' AND quantity > 0),
+        card TEXT,
+        CHECK (inventory_id IS NOT NULL OR card IS NOT NULL),
+        UNIQUE (trade_id, inventory_id)
+    )
+'''
+TRADE_HELD = 'These copies are set aside for a trade: take them out of the trade first'
+TRADE_TRIGGERS = (
+    f'''CREATE TRIGGER IF NOT EXISTS trade_keeps_entry BEFORE DELETE ON inventory
+        WHEN EXISTS (SELECT 1 FROM trade_cards WHERE inventory_id = OLD.id)
+        BEGIN SELECT RAISE(ABORT, '{TRADE_HELD}'); END''',
+    f'''CREATE TRIGGER IF NOT EXISTS trade_keeps_copies BEFORE UPDATE OF quantity ON inventory
+        WHEN NEW.quantity < OLD.quantity
+             AND NEW.quantity < (SELECT COALESCE(SUM(quantity), 0) FROM trade_cards WHERE inventory_id = OLD.id)
+        BEGIN SELECT RAISE(ABORT, '{TRADE_HELD}'); END''',
+)
 INVENTORY_INDEXES = ('CREATE INDEX IF NOT EXISTS idx_inventory_game_name ON inventory(game, card_name COLLATE NOCASE)',
                      'CREATE INDEX IF NOT EXISTS idx_inventory_timestamp ON inventory(timestamp DESC)')
 CAPTURES_INDEXES = ('CREATE INDEX IF NOT EXISTS idx_captures_entry ON inventory_captures(inventory_id)',)
@@ -209,6 +246,10 @@ class InventoryManager:
         self.conn = storage.connect(self.db_file)
         self._initialize_table()
         self._add_constraints()
+        with self._lock:
+            for trigger in TRADE_TRIGGERS:
+                self.conn.execute(trigger)
+            self._commit()
 
     def _commit(self):
         """Commit, and only then delete the thumbnails of the captures that went with it: rolled
@@ -264,6 +305,9 @@ class InventoryManager:
             if new_file:
                 # A new file is made with the constraints: nothing to migrate
                 storage.record(self.conn, CONSTRAINTS_MIGRATION, 'new file')
+            self.conn.execute(TRADES_TABLE)
+            self.conn.execute(TRADE_CARDS_TABLE)
+            self.conn.execute('CREATE INDEX IF NOT EXISTS idx_trade_cards_entry ON trade_cards(inventory_id)')
             self.conn.execute(PENDING_MOVES_TABLE)
             if 'station' not in {row['name'] for row in self.conn.execute('PRAGMA table_info(pending_moves)')}:
                 self.conn.execute('ALTER TABLE pending_moves ADD COLUMN station TEXT')
@@ -934,6 +978,12 @@ class InventoryManager:
             raise ValueError(f"{action} needs a value")
         changed = 0
         with self._lock:
+            # Each entry is committed on its own: what would stop part way is refused before
+            # anything changes - whole stacks that go or move while a trade holds copies of them
+            if action in ('delete', 'location') and row_ids and self.conn.execute(
+                    f"SELECT 1 FROM trade_cards WHERE inventory_id IN ({', '.join('?' * len(row_ids))})",
+                    tuple(row_ids)).fetchone():
+                raise sqlite3.IntegrityError(TRADE_HELD)
             for row_id in row_ids:
                 row = self._get_row(row_id)
                 if not row:  # merged into another entry earlier in this loop, or already gone

@@ -91,6 +91,7 @@ container - or a second container with its own data folder and port.
 | Card data: schema, updates, search, printing match, confidence | `database.py`: `CARD_COLUMNS`, `replace_table`, `card_data_info`, `search_card_exact`, `search_card`, `find_printings`, `CONFIRMED_MATCHES`, `search_key`, `names_match`; `Game.check_for_update`; `app.py`: `start_card_data_update`, `check_card_data_updates` |
 | Inventory: add / merge / undo / split / export, locations, tags, bulk edits, capture thumbnails | `inventory.py` (`KEY_COLUMNS`, `update_card`, `bulk_update`, `inventory_captures`, `data/captures/`); capture → add: `desk().pending_capture`, `card['capture']`; `scan_location` |
 | Scanned cards by camera (filter, per-camera move, clear) | `inventory.py`: `inventory_sources`, `_station_rows`, `_move_sources`, `stations_by_entry`, `get_all_cards(station)`, `get_stats(station)`, `take_from(station)`, `clear_inventory(station)`; `app.py`: `scan_camera`, `scan_stats`; `scanner.js`: `scannedCamera`, `loadInventoryCameras`; `common.js`: `addScannedToCollection(camera)` |
+| Trades: cards set aside until a trade is confirmed | `trades.py`: `Trades` (`add`, `set_quantity`, `confirm`, `cancel`, `by_entry`); `inventory.py`: `TRADES_TABLE`, `TRADE_CARDS_TABLE`, `TRADE_TRIGGERS`, `TRADE_HELD`; `app.py`: `trade_list`, `trade_item`, `trade_confirm`, `trade_export`, `write_refused`; `collection.js`: `loadTrades`, `renderTrades`, `setAsideForTrade` |
 | Backups of the collection, scanned cards and decks | `backups.py`: `create` (`keep`), `create_scheduled`, `restore` (`RESTORABLE`), `archive` / `add_archive`, `list_backups`, `INVENTORY_TABLES` (`data/backups/<date_time>/`); `app.py`: `collection_backups`, `restore_backup`; `collection.js`: `openSettings`, `renderBackups` |
 | Everything at one moment (all database files + pictures) | `backups.py`: `create_full`; `app.py`: `full_backup`, `maintenance_barrier`; `scripts/backup.sh` |
 | Database connections, migrations, measurements | `storage.py`: `connect`, `rebuild`, `schema_migrations`; `scripts/benchmark_db.py` (on copies only) |
@@ -154,6 +155,12 @@ container - or a second container with its own data folder and port.
   existing table is a named migration through `storage.rebuild` (backup, one transaction,
   counts compared) with the new definition also in the `CREATE TABLE` for new files; try it
   on a copy of the real databases before deploying.
+- **Copies a trade holds stay.** Triggers on `inventory` refuse to delete an entry an open
+  trade holds copies of, or to lower it below them (`TRADE_HELD`): new code that removes or
+  moves copies needs no check of its own, but must roll back when the statement fails
+  (`@_writes`), and anything that commits entry by entry must refuse held entries before it
+  starts (as `bulk_update` does). A trade's own code lets go of the entry first
+  (`inventory_id = NULL`), then takes the copies.
 - **Scanned cards and cameras.** Entries merge across cameras; who scanned what is beside them
   (`inventory_sources`, `inventory_captures.station`; `add_card(source=...)`). Anything that
   shows or moves "a camera's cards" goes through `_station_rows`; anything that moves copies

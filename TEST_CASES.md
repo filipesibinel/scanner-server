@@ -167,6 +167,19 @@ For data-changing tests compare database rows, summed quantities, per-finish pri
 | INV-22 | P0 U/I | Reduce quantity, split, merge, move, and delete rows with multiple captures. | Capture associations follow copies; trimmed/deleted rows leave no broken references or unrelated deletions. |
 | INV-23 | P2 E | Disable browser storage, then sort/switch views/reload. | Interface stays usable even when preferences cannot be saved. |
 
+### Trades
+
+| ID | Priority | Test | Expected |
+|---|---|---|---|
+| TRD-01 | P0 U/E | Tick entries, **Set aside for trade** with a new name; again with the same name in another case; with an entry that has no free copy. | One open trade; the cards stay in the inventory with a "Trade: name" badge and count in totals, statistics and decks; entries without a free copy are reported, not added. |
+| TRD-02 | P0 U/I | Delete, lower below the held copies, bulk-delete, bulk-move, "Remove this batch", clear, and replace-import an entry a trade holds. | Each is refused with the sentence about the trade; nothing is half done (also not the other entries of a bulk action). The free copies and condition / tags can still be changed. |
+| TRD-03 | P1 U/E | On the Trades tab: − / + / × per card, two trades holding copies of one entry, rename to an open trade's name. | Quantities stay within what the entry has free; × leaves the card in the collection; the rename is refused. |
+| TRD-04 | P0 U/E | **Confirm trade**; press it twice (two tabs); make it fail part way. | The copies leave the collection once, with the newest photos; the trade moves to Confirmed trades with the cards as they were; a failure changes nothing. |
+| TRD-05 | P1 U/E | **Cancel trade**; **Delete from history** on a confirmed one. | Cancel: the cards are free, nothing else changed. Delete: only the record goes. |
+| TRD-06 | P1 E | **Export…** an open and a confirmed trade in each format; import the Moxfield file at Moxfield. | The file holds the trade's cards with the copies in the trade. Importing at Moxfield was never tried. |
+| TRD-07 | P0 U | Back up with an open trade, confirm it, restore; restore a backup from before trades over an open trade. | The trade is open again with its cards; the old backup restores with no trades. |
+| TRD-08 | P2 E | Search `trade:name` and `trade:""`; watch a second browser while a trade changes. | Only the cards set aside are listed; the other browser's list and badges follow. |
+
 ## 8. CSV import and exports
 
 | ID | Priority / layer | Setup and steps | Expected result |

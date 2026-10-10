@@ -31,7 +31,9 @@ BACKUP_ID = re.compile(r'^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}(-\d+)?$')
 # inventory_sources: which station scanned how many of an entry's copies (the scanned cards'
 # camera filter) - it goes with the entries, or a restore would leave today's ownership on
 # yesterday's entries
-INVENTORY_TABLES = ('inventory', 'inventory_captures', 'inventory_sources')
+# trades / trade_cards: the cards set aside for a trade name their entries (used in the
+# collection; the scanned cards' file has the tables too, empty)
+INVENTORY_TABLES = ('inventory', 'inventory_captures', 'inventory_sources', 'trades', 'trade_cards')
 DECK_TABLES = ('decks', 'deck_cards')
 CAPTURE_NAME = re.compile(r'^[A-Za-z0-9_-]+\.(jpg|jpeg|png)$')  # a capture inside an uploaded backup
 UPLOAD_MAX_BYTES = 2 * 1024 ** 3  # an uploaded backup, unpacked (a 4,600-card one is ~100 MB)
@@ -43,6 +45,9 @@ RESTORABLE = {
     'inventory': 'quantity > 0',
     'inventory_captures': 'inventory_id IN (SELECT id FROM {prefix}inventory WHERE quantity > 0)',
     'inventory_sources': 'quantity > 0 AND inventory_id IN (SELECT id FROM {prefix}inventory WHERE quantity > 0)',
+    'trades': '1',
+    'trade_cards': 'quantity > 0 AND trade_id IN (SELECT id FROM {prefix}trades) AND (inventory_id IS NULL '
+                   'OR inventory_id IN (SELECT id FROM {prefix}inventory WHERE quantity > 0))',
     'decks': '1',
     'deck_cards': "quantity > 0 AND board IN ('commander', 'main', 'side') AND deck_id IN (SELECT id FROM decks)",
 }
@@ -251,11 +256,14 @@ def restore(backup_id, inventory, scan_inventory, deck_store):
             # restored already - the backup just made has the state from before
             for prefix, manager, tables in parts:
                 try:
+                    # Emptied from the last table to the first: an entry that a trade holds
+                    # cannot be deleted while the trade's rows are there (TRADE_TRIGGERS)
+                    for table in reversed(tables):
+                        manager.conn.execute(f'DELETE FROM {table}')
                     for table in tables:
                         # Columns added since the backup keep their defaults
                         saved = _columns(source, prefix + table)
                         columns = [column for column in _columns(manager.conn, table) if column in saved]
-                        manager.conn.execute(f'DELETE FROM {table}')
                         if not saved:
                             # A table the backup was made without (inventory_sources, before
                             # stations): it stays empty - what is there now belongs to other entries

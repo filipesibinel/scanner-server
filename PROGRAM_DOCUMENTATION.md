@@ -91,6 +91,7 @@ inside `app.py` or inside `station_client.py`.
 | `database.py` | server | Scryfall download and import, schema / migrations, searches, printing lookup, match confidence |
 | `games/` | server | Card games: `base.Game` (the interface the app uses), `mtg.Magic` (Scryfall data, matching, finishes, exports); `games.active()` is the game being scanned |
 | `card_search.py` | server | Magic search helpers combining name, number, set and treatment |
+| `trades.py` | server | Cards of the collection set aside for a trade until it is confirmed (`Trades`); the tables and the triggers that keep the copies are in `inventory.py` |
 | `inventory.py` | server | Inventory table for every game: schema + migration, add (merging duplicates), undo, edit / split, bulk edits, locations and tags, which station scanned what, move to the collection, CSV import / export |
 | `decks.py`, `games/mtg_decks.py` | server | Decks (`decks`, `deck_cards`): lists of card names; formats, deck checks, text decklists |
 | `recommendations.py` | server | Deck ideas from EDHREC, MTGJSON, Archidekt and Moxfield, cached in `data/web_cache.db` |
@@ -906,6 +907,19 @@ clearing entries deletes their files. Entries added before this, or imported, ha
 an entry's copies each station added. It only matters for the scanned cards - see
 [The scanned cards, by camera](#the-scanned-cards-by-camera).
 
+**`trades`** and **`trade_cards`** (also `inventory.py`: `TRADES_TABLE`, `TRADE_CARDS_TABLE`;
+used in the collection - the scanned cards' file has them too, empty) - a trade is `game`,
+`name`, `status` (`open` / `done`), `created_at`, `closed_at`; a row of `trade_cards` is
+`trade_id`, `inventory_id`, `quantity` and `card`. In an open trade the row names the entry
+and how many of its copies are set aside (one row per entry and trade; several trades may hold
+copies of one entry, never more between them than it has - `Trades.add` / `set_quantity`).
+A confirmed trade's rows have no entry (`inventory_id` NULL) and keep the card as it was, as
+JSON, in `card`. Two triggers (`TRADE_TRIGGERS`, made again at every start, because a rebuilt
+table loses its triggers) keep what an open trade holds: an entry with such a row cannot be
+deleted (`trade_keeps_entry`) and its quantity cannot be lowered below the copies set aside
+(`trade_keeps_copies`) - by any part of the program; the statement fails with `TRADE_HELD`,
+the method's changes are rolled back, and the page shows the sentence. See [Trades](#trades).
+
 Inventories from before multi-game support (`foil`/`surge` flags) are rebuilt once on startup:
 the old table is first copied to `data/backups/inventory_before_multigame_<time>.db`, the
 migration checks that the card count is unchanged, and it runs in one transaction.
@@ -1094,13 +1108,54 @@ at the same `added_at` (two in one second, a file with repeated rows) add up in
 moved back to the scanner. Both columns are added on startup (`ALTER TABLE`; `added_at` starts
 as the scan time).
 
+### Trades
+
+Cards promised to someone stay in the collection until the trade has happened
+(`trades.py`: `Trades`, made on the collection's `InventoryManager` - its connection, its lock;
+tables in [Database](#database)). **Set aside for trade** on the bulk bar asks for a name
+(`POST /api/trades`, JSON `name`, `ids`): the open trade with that name, whatever the case, or
+a new one, takes every copy of the selected entries that no trade holds yet. Nothing in the
+inventory changes: the cards are still owned - totals, statistics and decks count them - and
+their rows get a **Trade: name** badge (`/api/inventory` gives each entry `trades`:
+`[{id, name, quantity}]`, `Trades.by_entry`); `trade:name` in the search field finds them.
+
+The **Trades** tab (`GET /api/trades`; `collection.js`: `loadTrades`, `renderTrades`,
+`tradeAction`) lists the open trades with their cards, value and date. Per card: **−** / **+**
+change how many copies the trade holds, **×** takes the card out
+(`PUT /api/trades/<id>/cards/<row>`, JSON `quantity`, 0 = out). Per trade: **Export…**
+downloads its cards in one of the game's export formats (`GET /api/trades/<id>/export/<format>`
+- Moxfield's collection CSV for Magic, or the app's own; `quantity` is the copies in the
+trade), **Rename** (`PUT /api/trades/<id>`), **Cancel trade** (`DELETE /api/trades/<id>`: the
+trade and its rows go, the cards are simply free again) and **Confirm trade**
+(`POST /api/trades/<id>/confirm`, `Trades.confirm`): in one transaction each row keeps the
+card as it was and lets go of its entry, the copies leave the collection - the entry is
+deleted or lowered, with the newest photos and the cameras' counts as for any lowered quantity
+(`_take_copies`, `_trim_sources`, `_trim_captures`) - and the trade becomes `done`. It stays
+under **Confirmed trades** as a record (cards, value, date; it can still be exported) until
+**Delete from history** (`DELETE` again).
+
+While a trade holds copies, the database refuses everything that would take them: deleting the
+entry, lowering its quantity below what is held, moving a whole stack of several copies to
+another location or merging the entry into another one by an edit (both delete the entry; a
+single card is changed where it is and stays in its trade), "Remove this batch", clearing
+the inventory, an import that replaces it. The page shows "These copies are set aside for a
+trade: take them out of the trade first" (`TRADE_HELD`; `app.py`: `write_refused`). Copies the
+trade does not hold can be changed as always, and so can condition, tags and price. Bulk
+delete and bulk move, which commit entry by entry, are refused before anything changes when
+one of the entries is held. Trades are in every backup (`backups.INVENTORY_TABLES`): a restore
+brings back the trades of that moment with their entries - a trade confirmed since is open
+again, its cards back - and a backup from before trades restores with none.
+
+Never tested: two browsers changing one trade at the same moment (each change is one
+transaction under the collection's lock, so the second sees the first's result or is refused).
+
 ### Backups
 
 The gear button opens the page's settings drawer (`/collection#settings` opens it directly; the
 scanner pages' drawers link there, and this one links to a scanner page's settings for camera,
 AI and sound - `settings_url`).
 **Back up now** (`POST /api/backups`, `backups.create`) writes `data/backups/<date_time>/`:
-`backup.db` with plain copies of `inventory`, `inventory_captures` and `inventory_sources` of the collection
+`backup.db` with plain copies of `inventory`, `inventory_captures`, `inventory_sources`, `trades` and `trade_cards` of the collection
 (`collection_*`) and of the scanned cards (`scanned_*`), `decks`, `deck_cards` and an `info`
 row (time, note, counts) - every game - and `captures/`, hard links to the thumbnails those
 entries point at (no extra space; they survive the app deleting its own). It is written to a
@@ -1161,6 +1216,9 @@ does that for an installation without Docker).
 `/collection` (`templates/collection.html`, `static/js/collection.js`) works on the active
 game's inventory over the REST endpoints; it listens to `inventory_updated`, `inventory_undone`
 and `inventory_prices_updated` to follow what is scanned meanwhile, and reloads on `game_changed`.
+A change to a trade is announced as `collection_updated` (`app.py`: `collection_changed`, no
+payload), which only this page listens to: a scanner page takes `inventory_updated` for a card
+that was just added and would drop the card it is showing.
 
 **Inventory tab.** `/api/inventory` adds to every row its `location`, `tags` and `details` from
 `Game.card_details` (Magic: image, mana value, color identity). Filters (text,
@@ -1284,7 +1342,7 @@ Three pages, all served by `app.py`, with one header (`templates/_topbar.html`):
 |---|---|---|
 | `/` | `stations.html` (inline script) | The cameras: each station with its state and a link to its page. With a camera on the server itself, `/` is that camera's scanner page instead |
 | `/scan/<id>` | `scanner.html`, `static/js/scanner.js` | One station's scanner page. `window.STATION` tells the script which; a station without a camera gets the page without the camera panel |
-| `/collection` | `collection.html`, `static/js/collection.js` | Inventory, decks, statistics, backups |
+| `/collection` | `collection.html`, `static/js/collection.js` | Inventory, decks, trades, statistics, backups |
 
 `static/js/common.js` and `templates/_dialogs.html` hold what the pages share (text helpers,
 in-page dialogs and notifications, the edit dialog, the capture viewer, "Add to collection");
@@ -1337,7 +1395,7 @@ one game exists. Card payloads may carry `finish_options` (only those finishes a
 | `data/settings.json` | Choices made in the web interface that are everyone's: AI provider / model, OCR first, the game, automatic backups (`backup_every_hours`, `backup_keep`), sound on / off, the capture beep and the card-added ding each on / off (`sound_capture`, `sound_added`) and volume (`POST /api/sound`), debug mode (`debug_mode`: Flask's debugger, and every request in `data/logs/requests.log`; taken when the server starts, always without the reloader). Also the camera settings of a camera on the server itself - which a new station inherits until it has its own |
 | `data/stations.json` | The stations: name, location, capture count, last seen, `camera` (it connects as a camera station), and `settings` - each station's `focus_value`, `camera_rotation`, `refocus_every`, `fixed_area`, `fixed_area_enabled`, `debug_trace`, `auto_add` |
 | `data/prompts.json` | Prompt instructions edited in Settings, per game / kind / model (`prompts.py`) |
-| `data/cards_database.db` | Card data (`cards`, `card_data_info`), the collection (`inventory`, `inventory_captures`, `inventory_sources`), decks (`decks`, `deck_cards`), the review queue (`review_queue`), and the captures already applied to it (`applied_captures`) |
+| `data/cards_database.db` | Card data (`cards`, `card_data_info`), the collection (`inventory`, `inventory_captures`, `inventory_sources`, and the trades: `trades`, `trade_cards`), decks (`decks`, `deck_cards`), the review queue (`review_queue`), and the captures already applied to it (`applied_captures`) |
 | `data/web_cache.db` | Answers cached from other sites (`recommendations.py`): disposable, not in backups |
 | `data/scan_inventory.db` | Cards scanned and not yet added to the collection (the same three inventory tables, and `pending_moves`) |
 | `data/pending_captures.db` | Captures waiting in the OCR / AI queues, queued again after a restart (`pending_captures`), and what became of uploaded ones (`settled_captures`, 30 days) |
@@ -1395,6 +1453,14 @@ collection, a clear - and backups: ownership restored, restored over another sta
 from before stations, restoring the oldest automatic backup. Everything runs on temporary
 databases and folders. These are the cases of a code review of 2026-10-09; 13 of the 14 fail
 against the code from before its fixes.
+
+`tests/test_trades.py` covers the cards set aside for a trade: they stay in the collection,
+two trades never hold the same copy, nothing else can delete, lower, move or clear what a
+trade holds (and a refused change leaves nothing half done), cancelling changes nothing,
+confirming removes the copies with their photos and leaves a record, a confirm that fails
+changes nothing, and backups (a restore brings a trade back with its entries, over an open
+trade, from before trades). The routes and the page were tried in headless Chromium against
+the server's code on a temporary copy of test data (2026-10-10), not against the server.
 
 There are no automated tests for the rest. [TEST_CASES.md](TEST_CASES.md) lists what to check
 by hand. For scanner logic, recorded or synthetic frames can be fed through `CardScanner` with

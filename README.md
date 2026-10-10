@@ -254,6 +254,12 @@ cards and to build decks. It works on a phone too.
 - **Preconstructed decks** - **View cards** shows what is in one without saving anything;
   **Create deck** there makes a deck list to change as you like; **I own
   it** also adds its cards to your inventory (the printings and foils that come in the box).
+- **Trades** - promised some cards to someone? Tick them and press **Set aside for trade**,
+  and give the trade a name. The cards stay in your collection, marked *Trade: name*, and
+  cannot be deleted or moved away by accident. On the **Trades** tab you see each open trade
+  with its value, change how many copies go, and **Export** the list (Moxfield's format, or
+  the app's own). **Confirm trade** when it has happened - only then do the cards leave your
+  collection, and the trade stays in a history - or **Cancel trade** and nothing has changed.
 - **Added by mistake?** The *Added* filter lists each "Add to collection" with its time. Choose
   one and click **Remove this batch** to take exactly those copies back out.
 - **Statistics** - cards and value by color, type, rarity, finish, set, location and tag, and

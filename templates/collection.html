@@ -7,7 +7,7 @@
     <title>Collection - Card Scanner</title>
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=43">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/collection.css') }}?v=17">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/collection.css') }}?v=18">
 </head>
 <body>
     {% include '_icons.html' %}
@@ -24,7 +24,7 @@
             </div>
             <div class="panel filter-panel">
                 <div class="filter-row">
-                    <input type="search" id="filter-text" class="text-input filter-text" placeholder="Search, or set:HOB" title='Looks in name, set, type, rarity, location and tags. To look in one place only: set:HOB (the set code, whole), name:ring, type:elf, rarity:rare, tag:trade, loc:"Binder 2", finish:foil, number:14. A minus in front leaves those out: -set:HOB'>
+                    <input type="search" id="filter-text" class="text-input filter-text" placeholder="Search, or set:HOB" title='Looks in name, set, type, rarity, location and tags. To look in one place only: set:HOB (the set code, whole), name:ring, type:elf, rarity:rare, tag:trade, loc:"Binder 2", finish:foil, number:14, trade:jo (set aside for that trade). A minus in front leaves those out: -set:HOB'>
                     <label class="chip-toggle" title="Turn the search around: show the cards that do NOT match what is typed (type set:HOB to see everything that is not from that set)"><input type="checkbox" id="filter-text-not"><span>Not</span></label>
                     <div class="color-chips" id="filter-colors" title="Color identity"></div>
                     <select id="filter-type" class="select" title="Type"></select>
@@ -78,6 +78,7 @@
                 <button class="btn btn-small" data-bulk="remove_tag">Remove tag</button>
                 <button class="btn btn-small" data-bulk="condition">Set condition</button>
                 <button class="btn btn-small" data-bulk="deck" id="bulk-deck">Add to deck</button>
+                <button class="btn btn-small" data-bulk="trade" title="Keep these cards for a trade: they stay in your collection until you confirm it on the Trades tab">Set aside for trade</button>
                 <button class="btn btn-small btn-danger" data-bulk="delete">Delete</button>
                 <span class="spacer"></span>
                 <button class="btn btn-small btn-ghost" id="bulk-all">Select all shown</button>
@@ -257,6 +258,19 @@
             </div>
         </section>
 
+        <!-- ================= Trades ================= -->
+        <section id="tab-trades" class="tab-panel" hidden>
+            <div class="panel">
+                <div class="section-head">
+                    <h2>Trades</h2>
+                </div>
+                <p class="hint">Cards set aside for a trade stay in your collection, marked, until you confirm the trade - only then are they removed. To start one, tick cards on the Inventory tab and press <strong>Set aside for trade</strong>.</p>
+            </div>
+            <div id="trades-open"></div>
+            <h3 class="section-title" id="trades-done-title" hidden>Confirmed trades</h3>
+            <div id="trades-done"></div>
+        </section>
+
         <!-- ================= Statistics ================= -->
         <section id="tab-stats" class="tab-panel" hidden>
             <div class="inventory-stats" id="stats-tiles"></div>
@@ -417,6 +431,6 @@
     {% include '_dialogs.html' %}
 
     <script src="{{ url_for('static', filename='js/common.js') }}?v=17"></script>
-    <script src="{{ url_for('static', filename='js/collection.js') }}?v=32"></script>
+    <script src="{{ url_for('static', filename='js/collection.js') }}?v=33"></script>
 </body>
 </html>

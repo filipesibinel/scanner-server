@@ -245,6 +245,11 @@ a.btn {
     color: var(--accent);
 }
 
+.inventory-badge.trade {
+    background: var(--warning-soft);
+    color: var(--warning);
+}
+
 .inventory-badge.tag {
     background: var(--surface-3);
     color: var(--text-muted);
@@ -335,6 +340,66 @@ a.btn {
     align-items: center;
     flex-wrap: wrap;
     gap: 8px;
+}
+
+/* ---------------------------------------------------------------- Trades */
+
+.trade {
+    margin-top: 14px;
+}
+
+.trade-name {
+    font-size: 15px;
+    font-weight: 650;
+}
+
+.trade > summary {
+    cursor: pointer;
+}
+
+.trade-cards {
+    margin-top: 10px;
+}
+
+.trade-row {
+    display: grid;
+    grid-template-columns: 76px 1fr auto 96px;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+}
+
+.trade-row:hover {
+    background: var(--surface-2);
+}
+
+.trade-qty {
+    font-variant-numeric: tabular-nums;
+}
+
+.trade-steps {
+    display: flex;
+    gap: 4px;
+    justify-content: flex-end;
+}
+
+.trade-steps .mini-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+details.trade .trade-row {
+    grid-template-columns: 76px 1fr auto;
+}
+
+.trade-actions {
+    margin-top: 10px;
+}
+
+#trades-done-title {
+    margin: 24px 0 0;
 }
 
 /* ---------------------------------------------------------------- Decks */

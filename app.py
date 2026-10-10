@@ -28,6 +28,8 @@ import csv
 import hmac
 import cv2
 import io
+import re
+import sqlite3
 import numpy as np
 from datetime import datetime
 from pathlib import Path
@@ -211,7 +213,8 @@ scanned_cards_logger = logging.getLogger('scanned_cards')
 
 from config import Config
 from database import CardDatabase, search_key
-from inventory import InventoryManager
+from inventory import InventoryManager, TRADE_HELD
+from trades import Trades, TradeError
 from decks import DeckManager
 import backups
 from recommendations import Recommendations, Unavailable
@@ -267,6 +270,7 @@ database = None
 inventory = None           # the collection (table inventory in the card database file)
 daily_backup_status = ''    # the startup banner's line about the day's backup
 scan_inventory = None      # what the scanner page adds to, until it is moved to the collection
+trade_store = None        # trades.Trades: the collection's cards set aside for a trade
 review = None             # review.ReviewQueue
 deck_store = None         # decks.DeckManager
 recommend = None          # recommendations.Recommendations
@@ -754,7 +758,7 @@ def resume_pending():
 
 def initialize_components():
     """Initialize all components"""
-    global app_settings, camera_hub, default_desk, identification, stations, pending, database, inventory, scan_inventory, review, deck_store, recommend
+    global app_settings, camera_hub, default_desk, identification, stations, pending, database, inventory, scan_inventory, review, deck_store, recommend, trade_store
 
     logger.info("Initializing components...")
 
@@ -796,6 +800,7 @@ def initialize_components():
     # Scanned cards wait in their own file: clearing them never touches the collection
     scan_inventory = InventoryManager(db_file=SCAN_INVENTORY_FILE, log_callback=log_to_client)
     inventory.finish_interrupted_moves(scan_inventory)  # an "Add to collection" cut short by a crash
+    trade_store = Trades(inventory)
     review = ReviewQueue()
     pending = PendingCaptures()
     deck_store = DeckManager()
@@ -1030,9 +1035,12 @@ def get_inventory():
             in_decks = deck_store.needed_by_name(game.id, commander_formats(game)) \
                 if game.deck_formats and inventory_area() is inventory else {}
             placed = copies_by_location(cards)
+            # The open trades that hold copies of each entry (the collection only)
+            in_trades = trade_store.by_entry(game.id) if inventory_area() is inventory else {}
             for card in cards:
                 card['details'] = details.get(card['card_id'], {})
                 card['decks'] = decks_using(card, in_decks, placed)
+                card['trades'] = in_trades.get(card['id'], [])
 
             return jsonify({
                 'success': True,
@@ -1173,6 +1181,100 @@ def remove_inventory_batch():
     if not added_at:
         return jsonify({'success': False, 'error': 'added_at is missing'}), 400
     return jsonify({'success': True, **inventory_area().remove_batch(games.active().id, added_at)})
+
+
+# ============================================================================
+# Trades (collection page) - cards set aside until a trade is confirmed
+# ============================================================================
+
+@app.errorhandler(TradeError)
+def trade_refused(error):
+    return jsonify({'success': False, 'error': str(error)}), 400
+
+
+@app.errorhandler(sqlite3.IntegrityError)
+def write_refused(error):
+    """A change the database refused - for the page, the one about copies a trade holds"""
+    if TRADE_HELD not in str(error):
+        logger.exception(f"Refused by the database: {error}")
+    return jsonify({'success': False, 'error': str(error)}), 409
+
+
+def collection_changed():
+    """Other pages showing the collection read it again. An event of its own: a scanner page
+    takes inventory_updated for a card that was added, and drops the card it is showing"""
+    socketio.emit('collection_updated', {}, namespace='/')
+
+
+@app.route('/api/trades', methods=['GET', 'POST'])
+def trade_list():
+    """
+    GET: the active game's trades, open ones first, then the confirmed ones.
+    POST (JSON: name, ids): set every free copy of these collection entries aside for the open
+    trade with that name - a new one when there is none.
+    """
+    game = games.active()
+    if request.method == 'GET':
+        return jsonify({'success': True, 'trades': trade_store.list(game.id)})
+    data = request.get_json(silent=True) or {}
+    try:
+        ids = [int(row_id) for row_id in data.get('ids') or []]
+    except (ValueError, TypeError):
+        return jsonify({'success': False, 'error': 'ids must be numbers'}), 400
+    result = trade_store.add(game.id, data.get('name'), ids)
+    collection_changed()
+    return jsonify({'success': True, **result})
+
+
+@app.route('/api/trades/<int:trade_id>', methods=['PUT', 'DELETE'])
+def trade_item(trade_id):
+    """PUT (JSON: name): rename. DELETE: cancel an open trade (its cards stay in the
+    collection), or take a confirmed one out of the history."""
+    if request.method == 'PUT':
+        trade_store.rename(trade_id, (request.get_json(silent=True) or {}).get('name'))
+    else:
+        try:
+            trade_store.cancel(trade_id)
+        except TradeError:
+            trade_store.delete(trade_id)
+    collection_changed()
+    return jsonify({'success': True})
+
+
+@app.route('/api/trades/<int:trade_id>/cards/<int:row_id>', methods=['PUT'])
+def trade_card(trade_id, row_id):
+    """How many copies of one of its cards an open trade holds (JSON: quantity; 0 takes it out)"""
+    try:
+        quantity = int((request.get_json(silent=True) or {}).get('quantity'))
+    except (ValueError, TypeError):
+        return jsonify({'success': False, 'error': 'quantity must be a number'}), 400
+    trade_store.set_quantity(trade_id, row_id, quantity)
+    collection_changed()
+    return jsonify({'success': True})
+
+
+@app.route('/api/trades/<int:trade_id>/confirm', methods=['POST'])
+def trade_confirm(trade_id):
+    """The trade happened: its cards leave the collection, the trade stays as a record"""
+    result = trade_store.confirm(trade_id)
+    collection_changed()
+    return jsonify({'success': True, **result})
+
+
+@app.route('/api/trades/<int:trade_id>/export/<fmt>')
+def trade_export(trade_id, fmt):
+    """Download a trade's cards (open or confirmed) in one of the game's export formats"""
+    game = games.active()
+    formats = game.export_formats()
+    trade = next((trade for trade in trade_store.list(game.id) if trade['id'] == trade_id), None)
+    if fmt not in formats or not trade:
+        return jsonify({'error': 'Unknown trade or export format'}), 404
+    _label, _prefix, writer = formats[fmt]
+    text = io.StringIO(newline='')
+    writer(trade['cards'], text)
+    name = re.sub(r'[^A-Za-z0-9_-]+', '_', trade['name']).strip('_') or 'trade'
+    return Response(text.getvalue(), mimetype='text/csv',
+                    headers={'Content-Disposition': f'attachment; filename="trade_{name}_{fmt}.csv"'})
 
 
 def backup_schedule():
