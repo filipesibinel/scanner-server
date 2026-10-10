@@ -223,8 +223,13 @@ narrowed to one camera it shows that camera's copies and can't be edited from th
 cards and to build decks. It works on a phone too.
 
 - **Inventory** - filter by name, color identity, type, rarity, set, finish, location, tag and
-  price, or tick **Not in a deck** to see only the cards no deck uses yet, or **No use in my
-  decks** to also leave out the cards EDHREC lists for your decks' commanders - what remains
+  price (in the search field, `set:HOB` finds that set only - not every card with "hob" in its
+  name; also `name:`, `type:`, `rarity:`, `tag:`, `loc:"Binder 2"`, `finish:`, `number:`, and a
+  minus in front to leave them out: `-set:HOB`). The filters are still set when you come
+  back to the page, and the list shows 25, 50, 100 or 200 cards a page. To select a few cards
+  in a row, tick the first, hold Shift and tick the last. Tick **Not in a deck** to see only
+  the cards no deck uses yet, or **No use in my decks** to also leave out the cards EDHREC
+  lists for your decks' commanders - what remains
   can be sold or given away; switch between the list and a grid of card images; tick entries to
   move them to a **location**, tag them (*trade*, *keep*), change their condition, add them to
   a deck or delete them in one step. Copies of the same printing can be in two locations -

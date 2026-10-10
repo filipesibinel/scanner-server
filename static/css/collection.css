@@ -331,6 +331,12 @@ a.btn {
     margin: 14px 0;
 }
 
+.pager {
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
 /* ---------------------------------------------------------------- Decks */
 .section-head {
     display: flex;

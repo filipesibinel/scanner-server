@@ -92,15 +92,53 @@ function showTab(tab) {
 const COLORS = [['W', 'White'], ['U', 'Blue'], ['B', 'Black'], ['R', 'Red'], ['G', 'Green'], ['C', 'Colorless']];
 const MTG_TYPES = ['Creature', 'Planeswalker', 'Instant', 'Sorcery', 'Artifact', 'Enchantment', 'Battle', 'Land'];
 const CONDITIONS = ['Mint', 'Near Mint', 'Excellent', 'Good', 'Played', 'Poor'];
-const PAGE_SIZE = 200;
+const PAGE_SIZES = [25, 50, 100, 200];
+// The filters kept for the next visit. Not the "Added" batch (it comes with "Remove this
+// batch") and not "No use in my decks" (it asks EDHREC before the list can show)
+const FILTER_FIELDS = ['filter-text', 'filter-type', 'filter-rarity', 'filter-set', 'filter-finish', 'filter-location',
+                       'filter-tag', 'filter-price-min', 'filter-price-max'];
+const FILTER_TICKS = ['filter-text-not', 'filter-free'];
 
 let inventory = [];
 let shown = [];             // after filters and sort
-let shownLimit = PAGE_SIZE;
+let pageSize = PAGE_SIZES.includes(parseInt(recall('collectionPageSize', ''))) ? parseInt(recall('collectionPageSize', '')) : 100;
+let page = 0;               // of shown, pageSize entries each
 let selected = new Set();   // entry ids
-let filterColors = new Set();
+let lastPicked = null;      // the entry ticked or unticked last: a shift-click reaches from it to the clicked one
+let savedFilters = recallFilters();   // until the first load has filled the lists to choose from
+let filterColors = new Set(savedFilters.colors);
 let suggested = null;       // {card name: [decks whose commander it is played with]}, while "No use in my decks" is ticked
 let inventoryView = recall('collectionView', 'list');
+
+function recallFilters() {
+    let saved = {};
+    try { saved = JSON.parse(recall('collectionFilters', '{}')) || {}; } catch (e) { /* not ours */ }
+    return {...saved, colors: Array.isArray(saved.colors) ? saved.colors.filter(color => COLORS.some(([key]) => key === color)) : []};
+}
+
+function saveFilters() {
+    const state = {colors: [...filterColors]};
+    FILTER_FIELDS.forEach(id => { if ($(id).value) state[id] = $(id).value; });
+    FILTER_TICKS.forEach(id => { if ($(id).checked) state[id] = true; });
+    remember('collectionFilters', JSON.stringify(state));
+}
+
+function restoreFilters() {
+    // Once, after the first load: a list takes only a value it offers, so a set or tag that
+    // is gone from the collection is not filtered by
+    FILTER_FIELDS.forEach(id => {
+        $(id).value = typeof savedFilters[id] === 'string' ? savedFilters[id] : '';
+        if ($(id).selectedIndex === -1) $(id).value = '';
+    });
+    FILTER_TICKS.forEach(id => { $(id).checked = savedFilters[id] === true; });
+    savedFilters = null;
+}
+
+function filtersChanged() {
+    page = 0;
+    saveFilters();
+    applyFilters();
+}
 
 function inventoryChanged() {
     // After an edit or delete (common.js), a bulk action or a change made while scanning;
@@ -148,6 +186,7 @@ async function loadInventory() {
     inventory = data.cards;
     selected = new Set([...selected].filter(id => inventory.some(card => card.id === id)));
     fillFilterOptions();
+    if (savedFilters) restoreFilters();
     if ($('filter-spare').checked) await loadSuggested();
     applyFilters();
     if (currentTab === 'stats') renderStats();
@@ -166,6 +205,7 @@ async function loadSuggested() {
 
 async function spareChanged() {
     if ($('filter-spare').checked) await loadSuggested();
+    page = 0;
     applyFilters();
 }
 
@@ -228,8 +268,41 @@ function knownLocations() {
     return distinct(inventory.map(card => card.location));
 }
 
+// Search terms that say where to look: set:HOB, rarity:rare, loc:"Binder 2", -tag:trade.
+// A set is its code, whole (HOB does not find the cards with "hob" in their name); typed
+// without a known code, part of the set's name. Tags, locations, finishes and numbers are whole
+const SEARCH_FIELDS = {
+    set: (card, value, setCodes) => setCodes.has(value) ? (card.set_code || '').toLowerCase() === value
+                                                        : (card.set_name || '').toLowerCase().includes(value),
+    name: (card, value) => (card.name || '').toLowerCase().includes(value),
+    type: (card, value) => (card.type_line || '').toLowerCase().includes(value),
+    rarity: (card, value) => (card.rarity || '').toLowerCase().startsWith(value),
+    tag: (card, value) => card.tags.some(tag => tag.toLowerCase() === value),
+    loc: (card, value) => (card.location || '').toLowerCase() === value,
+    finish: (card, value) => [card.finish, finishLabel(card.finish)].some(finish => (finish || '').toLowerCase() === value),
+    number: (card, value) => String(card.number || '').toLowerCase() === value,
+};
+SEARCH_FIELDS.location = SEARCH_FIELDS.loc;
+
+function parseSearch(text) {
+    // {terms: [{field, value, not}], phrase: what is left, looked for everywhere}. A word with
+    // a colon that names no field stays text ("Circle of Protection: Red", "foo:bar")
+    const terms = [];
+    const phrase = text.toLowerCase().replace(/(^|\s)(-?)([a-z]+):(?:"([^"]*)"|(\S+))/g, (all, space, not, field, quoted, word) => {
+        if (!SEARCH_FIELDS[field]) return all;
+        terms.push({field, value: quoted !== undefined ? quoted.trim() : word, not: !!not});
+        return ' ';
+    });
+    return {terms, phrase: phrase.replace(/\s+/g, ' ').trim()};
+}
+
 function applyFilters() {
-    const text = $('filter-text').value.trim().toLowerCase();
+    const {terms, phrase} = parseSearch($('filter-text').value);
+    const setCodes = new Set(inventory.map(card => (card.set_code || '').toLowerCase()).filter(Boolean));
+    const textMatches = card =>
+        (!phrase || [card.name, card.set_name, card.set_code, card.type_line, card.rarity, card.location, ...card.tags]
+            .some(value => (value || '').toLowerCase().includes(phrase)))
+        && terms.every(term => SEARCH_FIELDS[term.field](card, term.value, setCodes) !== term.not);
     const textNot = $('filter-text-not').checked;
     const type = $('filter-type').value, rarity = $('filter-rarity').value, set = $('filter-set').value;
     const finish = $('filter-finish').value, location = $('filter-location').value, tag = $('filter-tag').value;
@@ -239,8 +312,7 @@ function applyFilters() {
     const min = parseFloat($('filter-price-min').value), max = parseFloat($('filter-price-max').value);
     const rows = inventory.filter(card => {
         // "Not" turns the text search around: the cards that don't have the text anywhere
-        if (text && [card.name, card.set_name, card.set_code, card.type_line, card.rarity, card.location, ...card.tags]
-            .some(value => (value || '').toLowerCase().includes(text)) === textNot) return false;
+        if ((phrase || terms.length) && textMatches(card) === textNot) return false;
         if (type && mainType(card) !== type) return false;
         if (rarity && card.rarity !== rarity) return false;
         if (set && card.set_name !== set) return false;
@@ -260,10 +332,12 @@ function applyFilters() {
         return true;
     });
     $('batch-remove').hidden = !added;
+    // Filters come back on the next visit: show that the list is not everything
+    $('filter-clear').disabled = !(phrase || terms.length || type || rarity || set || finish || location || tag || added
+                                   || free || $('filter-spare').checked || !isNaN(min) || !isNaN(max) || filterColors.size);
     const sort = recall('collectionSort', 'added');
     $('inventory-sort').value = sort in INVENTORY_SORTS ? sort : 'added';
     shown = INVENTORY_SORTS[sort] ? [...rows].sort(INVENTORY_SORTS[sort]) : rows;
-    shownLimit = PAGE_SIZE;
     // Only cards the filters show can be selected: a bulk action must not reach cards out of sight
     const visible = new Set(rows.map(card => card.id));
     selected = new Set([...selected].filter(id => visible.has(id)));
@@ -341,10 +415,18 @@ function renderInventory() {
             ? '<div class="empty-state">No cards match the filters.</div>'
             : '<div class="empty-state">No cards in the inventory yet.<br>Scan some cards to build your collection.</div>';
     } else {
-        list.innerHTML = shown.slice(0, shownLimit).map(inventoryView === 'grid' ? gridCardHtml : listRowHtml).join('');
+        // The page stays where it was when the list is loaded again (after an edit); a filter
+        // that leaves fewer pages ends on the last one
+        const pages = Math.ceil(shown.length / pageSize);
+        page = Math.max(0, Math.min(page, pages - 1));
+        const first = page * pageSize;
+        list.innerHTML = shown.slice(first, first + pageSize).map(inventoryView === 'grid' ? gridCardHtml : listRowHtml).join('');
+        $('page-text').textContent = `${(first + 1).toLocaleString()}–${Math.min(first + pageSize, shown.length).toLocaleString()} of ${shown.length.toLocaleString()} · page ${page + 1} of ${pages}`;
+        $('page-first').disabled = $('page-prev').disabled = page === 0;
+        $('page-next').disabled = $('page-last').disabled = page >= pages - 1;
     }
-    $('inventory-more').hidden = shown.length <= shownLimit;
-    $('inventory-more').textContent = `Show more (${shown.length - shownLimit} left)`;
+    $('inventory-pager').hidden = shown.length <= pageSize;
+    $('inventory-page-size').value = pageSize;
     renderBulkBar();
 }
 
@@ -373,6 +455,26 @@ function toggleSelected(id, on) {
         row.querySelector('.row-check').checked = on;
     }
     renderBulkBar();
+}
+
+function pick(id, on, range) {
+    // A tick; with Shift held, every entry from the one ticked before to this one (in the
+    // order shown, also across pages) is ticked or unticked like it
+    const from = range ? shown.findIndex(card => card.id === lastPicked) : -1;
+    const to = shown.findIndex(card => card.id === id);
+    lastPicked = id;
+    if (from < 0 || to < 0 || from === to) return toggleSelected(id, on);
+    shown.slice(Math.min(from, to), Math.max(from, to) + 1).forEach(card => on ? selected.add(card.id) : selected.delete(card.id));
+    renderInventory();
+}
+
+function showPage(number) {
+    page = number;
+    renderInventory();
+    // The buttons are below the list: back to its first row, when that is out of sight
+    const topbar = document.querySelector('.topbar');
+    const above = $('inventory-list').getBoundingClientRect().top - (topbar ? topbar.offsetHeight : 0) - 12;
+    if (above < 0) window.scrollBy(0, above);
 }
 
 // -- One value for a bulk action ----------------------------------------------
@@ -1427,10 +1529,10 @@ function bindColorChips(id, colors, changed) {
 function bindInventoryEvents() {
     // Filters
     ['filter-type', 'filter-rarity', 'filter-set', 'filter-finish', 'filter-location', 'filter-tag', 'filter-added',
-     'filter-free', 'filter-text-not'].forEach(id => $(id).addEventListener('change', applyFilters));
+     'filter-free', 'filter-text-not'].forEach(id => $(id).addEventListener('change', filtersChanged));
     $('filter-spare').addEventListener('change', spareChanged);
-    ['filter-text', 'filter-price-min', 'filter-price-max'].forEach(id => $(id).addEventListener('input', debounce(applyFilters, 150)));
-    bindColorChips('filter-colors', filterColors, applyFilters);
+    ['filter-text', 'filter-price-min', 'filter-price-max'].forEach(id => $(id).addEventListener('input', debounce(filtersChanged, 150)));
+    bindColorChips('filter-colors', filterColors, filtersChanged);
     $('filter-clear').addEventListener('click', () => {
         ['filter-text', 'filter-type', 'filter-rarity', 'filter-set', 'filter-finish', 'filter-location', 'filter-tag',
          'filter-added', 'filter-price-min', 'filter-price-max'].forEach(id => { $(id).value = ''; });
@@ -1439,19 +1541,29 @@ function bindInventoryEvents() {
         $('filter-spare').checked = false;
         filterColors.clear();
         fillFilterOptions();
-        applyFilters();
+        filtersChanged();
     });
     $('inventory-sort').addEventListener('change', event => {
         remember('collectionSort', event.target.value);
+        page = 0;
         applyFilters();
     });
+    $('inventory-page-size').innerHTML = optionsHtml(PAGE_SIZES.map(size => [size, `${size} per page`]));
+    $('inventory-page-size').addEventListener('change', event => {
+        // The card at the top of the page stays on the page
+        const first = page * pageSize;
+        pageSize = parseInt(event.target.value);
+        remember('collectionPageSize', pageSize);
+        page = Math.floor(first / pageSize);
+        renderInventory();
+    });
+    $('page-first').addEventListener('click', () => showPage(0));
+    $('page-prev').addEventListener('click', () => showPage(page - 1));
+    $('page-next').addEventListener('click', () => showPage(page + 1));
+    $('page-last').addEventListener('click', () => showPage(Infinity));
     bindSwitch('view-switch', button => {
         inventoryView = button.dataset.view;
         remember('collectionView', inventoryView);
-        renderInventory();
-    });
-    $('inventory-more').addEventListener('click', () => {
-        shownLimit += PAGE_SIZE;
         renderInventory();
     });
     $('import-file-input').addEventListener('change', importInventory);
@@ -1467,9 +1579,13 @@ function bindInventoryEvents() {
         if (event.target.closest('.btn-edit')) return editCard(card, knownLocations(), () => shown);
         if (event.target.closest('.btn-delete')) return deleteCard(card.id, card.name);
         if (event.target.closest('.inventory-thumb') && card.captures.length) return openCaptures(card);
-        if (event.target.classList.contains('row-check')) return toggleSelected(card.id, event.target.checked);
+        if (event.target.classList.contains('row-check')) return pick(card.id, event.target.checked, event.shiftKey);
         // Grid: a click on the card selects it, a double click edits it
-        if (row.classList.contains('grid-card')) toggleSelected(card.id, !selected.has(card.id));
+        if (row.classList.contains('grid-card')) pick(card.id, !selected.has(card.id), event.shiftKey);
+    });
+    $('inventory-list').addEventListener('mousedown', event => {
+        // A shift-click selects cards, not the text between them
+        if (event.shiftKey) event.preventDefault();
     });
     $('inventory-list').addEventListener('dblclick', event => {
         const row = event.target.closest('.grid-card');

@@ -1165,8 +1165,22 @@ and `inventory_prices_updated` to follow what is scanned meanwhile, and reloads 
 **Inventory tab.** `/api/inventory` adds to every row its `location`, `tags` and `details` from
 `Game.card_details` (Magic: image, mana value, color identity). Filters (text,
 color identity, type, rarity, set, finish, location, tag, price), sorts, the list / image grid
-and the statistics are computed in the browser from that one response; rows render 200 at a
-time. Selected entries get the bulk bar (`POST /api/inventory/bulk`). Rows also carry `decks`:
+and the statistics are computed in the browser from that one response. The text field looks
+for what is typed anywhere in name, set name, set code, type line, rarity, location and tags;
+a term `field:value` (`collection.js`: `SEARCH_FIELDS`, `parseSearch`) looks in one place:
+`set:` is the whole set code when the collection has a set with that code (`set:HOB` does not
+find "Hobbiton"), otherwise part of the set's name; `name:` and `type:` are part of the text,
+`rarity:` its beginning, `tag:`, `loc:` / `location:`, `finish:` and `number:` the whole value
+(`loc:""`: no location). Quotes keep spaces together, a minus in front turns one term around
+(`-set:HOB`), and a word with a colon that names no field stays ordinary text. **Not** turns
+the whole field around. The filters are kept in the browser (`localStorage`: `collectionFilters`,
+`saveFilters` / `restoreFilters`) and are there again on the next visit - all but the "Added"
+batch and **No use in my decks**; a set, tag or location that is gone from the collection is
+not filtered by, and **Clear filters** can only be pressed while something is filtered. The
+list is shown in pages of 25 / 50 / 100 / 200 entries (100 until chosen, `collectionPageSize`;
+`showPage`): a changed filter or sort starts at the first page, a reload after an edit stays
+on the page. A tick with Shift held (`pick`) ticks or unticks every entry from the one ticked
+before to this one, in the order shown and also across pages. Selected entries get the bulk bar (`POST /api/inventory/bulk`). Rows also carry `decks`:
 the names of the decks that use the card (by name, `DeckManager.needed_by_name`; a Commander
 deck's considered cards don't count) - shown as a badge, and hidden by the **Not in a deck**
 tick. A deck lists names, not copies, so the location decides which copies are its own

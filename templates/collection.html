@@ -7,7 +7,7 @@
     <title>Collection - Card Scanner</title>
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=43">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/collection.css') }}?v=16">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/collection.css') }}?v=17">
 </head>
 <body>
     {% include '_icons.html' %}
@@ -24,8 +24,8 @@
             </div>
             <div class="panel filter-panel">
                 <div class="filter-row">
-                    <input type="search" id="filter-text" class="text-input filter-text" placeholder="Name, set, type...">
-                    <label class="chip-toggle" title="Turn the search around: show the cards that do NOT match what is typed (type HOB to see everything that is not from that set)"><input type="checkbox" id="filter-text-not"><span>Not</span></label>
+                    <input type="search" id="filter-text" class="text-input filter-text" placeholder="Search, or set:HOB" title='Looks in name, set, type, rarity, location and tags. To look in one place only: set:HOB (the set code, whole), name:ring, type:elf, rarity:rare, tag:trade, loc:"Binder 2", finish:foil, number:14. A minus in front leaves those out: -set:HOB'>
+                    <label class="chip-toggle" title="Turn the search around: show the cards that do NOT match what is typed (type set:HOB to see everything that is not from that set)"><input type="checkbox" id="filter-text-not"><span>Not</span></label>
                     <div class="color-chips" id="filter-colors" title="Color identity"></div>
                     <select id="filter-type" class="select" title="Type"></select>
                     <select id="filter-rarity" class="select" title="Rarity"></select>
@@ -44,7 +44,7 @@
                     <button class="btn btn-small btn-ghost" id="filter-clear">Clear filters</button>
                 </div>
                 <div class="filter-row">
-                    <label class="chip-toggle" id="select-all-label" title="Select every card the filters show, to move, tag or delete them together"><input type="checkbox" id="select-all"><span>Select all</span></label>
+                    <label class="chip-toggle" id="select-all-label" title="Select every card the filters show, to move, tag or delete them together. For a few in a row: tick the first, then hold Shift and tick the last"><input type="checkbox" id="select-all"><span>Select all</span></label>
                     <span class="summary" id="inventory-summary"></span>
                     <span class="spacer"></span>
                     <select id="inventory-sort" class="select" title="Sort">
@@ -59,6 +59,7 @@
                         <option value="rarity">Rarity: mythic first</option>
                         <option value="set">Set and number</option>
                     </select>
+                    <select id="inventory-page-size" class="select" title="How many cards a page shows"></select>
                     <div class="segmented" id="view-switch">
                         <button data-view="list" class="is-active" title="List"><svg class="icon"><use href="#i-list"/></svg></button>
                         <button data-view="grid" title="Card images"><svg class="icon"><use href="#i-grid"/></svg></button>
@@ -86,7 +87,13 @@
             <div id="inventory-list" class="inventory-list collection-list">
                 <div class="empty-state">Loading inventory...</div>
             </div>
-            <div class="more-row"><button class="btn" id="inventory-more" hidden>Show more</button></div>
+            <div class="more-row pager" id="inventory-pager" hidden>
+                <button class="btn btn-small" id="page-first" title="First page">«</button>
+                <button class="btn btn-small" id="page-prev">‹ Previous</button>
+                <span class="summary" id="page-text"></span>
+                <button class="btn btn-small" id="page-next">Next ›</button>
+                <button class="btn btn-small" id="page-last" title="Last page">»</button>
+            </div>
         </section>
 
         <!-- ================= Decks ================= -->
@@ -410,6 +417,6 @@
     {% include '_dialogs.html' %}
 
     <script src="{{ url_for('static', filename='js/common.js') }}?v=17"></script>
-    <script src="{{ url_for('static', filename='js/collection.js') }}?v=30"></script>
+    <script src="{{ url_for('static', filename='js/collection.js') }}?v=32"></script>
 </body>
 </html>
