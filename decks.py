@@ -11,19 +11,37 @@ import contextlib
 import sqlite3
 import threading
 
+import storage
 from config import Config
 from database import search_key
 from inventory import now
 
 BOARDS = ('commander', 'main', 'side')
+# card_id: the printing shown (image); the card itself is identified by its name. A deck's
+# cards go with the deck (ON DELETE CASCADE, on connections from storage.connect)
+DECK_CARDS_TABLE = '''
+    CREATE TABLE {table} (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        deck_id INTEGER NOT NULL REFERENCES decks(id) ON DELETE CASCADE,
+        card_name TEXT NOT NULL,
+        card_id TEXT,
+        quantity INTEGER NOT NULL DEFAULT 1 CHECK (typeof(quantity) = 'integer' AND quantity > 0),
+        board TEXT NOT NULL DEFAULT 'main' CHECK (board IN ('commander', 'main', 'side')),
+        UNIQUE(deck_id, card_name, board)
+    )
+'''
+# No index of its own on deck_id: UNIQUE(deck_id, card_name, board) starts with it and answers
+# "the cards of a deck" as fast (measured 2026-10-09, scripts/benchmark_db.py: 0.05 ms / 0.08 ms)
+DECK_CARDS_INDEXES = ()
+CONSTRAINTS_MIGRATION = 'deck_constraints_1'
 
 
 class DeckManager:
     def __init__(self, db_file=None):
         self._lock = threading.RLock()
         self._writes = 0  # _writing blocks open (they nest)
-        self.conn = sqlite3.connect(str(db_file or Config.DATABASE_FILE), check_same_thread=False, timeout=10.0)
-        self.conn.row_factory = sqlite3.Row
+        self.db_file = db_file or Config.DATABASE_FILE
+        self.conn = storage.connect(self.db_file)
         with self._lock:
             self.conn.execute('''
                 CREATE TABLE IF NOT EXISTS decks (
@@ -35,19 +53,22 @@ class DeckManager:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )''')
-            # card_id: the printing shown (image); the card itself is identified by its name
-            self.conn.execute('''
-                CREATE TABLE IF NOT EXISTS deck_cards (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    deck_id INTEGER NOT NULL,
-                    card_name TEXT NOT NULL,
-                    card_id TEXT,
-                    quantity INTEGER NOT NULL DEFAULT 1,
-                    board TEXT NOT NULL DEFAULT 'main',
-                    UNIQUE(deck_id, card_name, board)
-                )''')
-            self.conn.execute('CREATE INDEX IF NOT EXISTS idx_deck_cards_deck ON deck_cards(deck_id)')
+            if not self.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'deck_cards'").fetchone():
+                self.conn.execute(DECK_CARDS_TABLE.format(table='deck_cards'))
+                storage.record(self.conn, CONSTRAINTS_MIGRATION, 'new file')
+            self.conn.execute('DROP INDEX IF EXISTS idx_deck_cards_deck')
             self.conn.commit()
+            # Files from before the constraints: rebuilt with them, once. Left out are only cards
+            # of decks that are gone and rows without copies or on a board there is not
+            valid = ("deck_id IN (SELECT id FROM decks) AND CAST(quantity AS INTEGER) > 0 "
+                     "AND board IN ('commander', 'main', 'side')")
+            storage.rebuild(self.db_file, CONSTRAINTS_MIGRATION, [
+                ('deck_cards', DECK_CARDS_TABLE,
+                 f'SELECT id, deck_id, card_name, card_id, CAST(quantity AS INTEGER), board FROM deck_cards WHERE {valid}',
+                 DECK_CARDS_INDEXES)],
+                lambda conn: tuple(conn.execute(
+                    f'SELECT COUNT(*), COALESCE(SUM(CAST(quantity AS INTEGER)), 0), COALESCE(MAX(id), 0) '
+                    f'FROM deck_cards WHERE {valid}').fetchone()))
 
     @contextlib.contextmanager
     def _writing(self):

@@ -24,6 +24,7 @@ import threading
 import uuid
 from datetime import datetime, timedelta
 
+import storage
 from config import Config
 
 PENDING_FILE = Config.DATA_DIR / 'pending_captures.db'
@@ -47,8 +48,7 @@ def prune_applied(conn):
 
 class PendingCaptures:
     def __init__(self, db_file=None):
-        self.conn = sqlite3.connect(str(db_file or PENDING_FILE), check_same_thread=False, timeout=10.0)
-        self.conn.row_factory = sqlite3.Row
+        self.conn = storage.connect(db_file or PENDING_FILE)
         self._lock = threading.RLock()
         with self._lock:
             self.conn.execute('''
@@ -81,19 +81,34 @@ class PendingCaptures:
                     settled_at TEXT NOT NULL
                 )''')
             self.conn.execute('CREATE INDEX IF NOT EXISTS idx_settled_sender ON settled_captures(sender, number)')
+            # One record per capture a sender names: the database refuses a second one, whatever
+            # the code that asks first (app.py: capture_accept_lock) does
+            try:
+                self.conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_capture_id '
+                                  'ON pending_captures(COALESCE(sender, station, \'\'), capture_id) WHERE capture_id IS NOT NULL')
+            except sqlite3.IntegrityError:  # two records of one capture from before: they are read, then it holds
+                pass
             self.conn.execute('DELETE FROM settled_captures WHERE settled_at < ?', (timestamp(KEEP_DAYS),))
             self.conn.commit()
 
     def add(self, game, station, number, image, foil_image, foil_is_image, captured_at, capture_id=None, sender=None):
-        """Put a capture on record; returns (its row id, its uid)"""
+        """Put a capture on record; returns (its row id, its uid). A capture its sender named
+        before (capture_id) is not recorded twice: the record there is returns its id and uid."""
         uid = uuid.uuid4().hex
         with self._lock:
-            pending_id = self.conn.execute(
-                'INSERT INTO pending_captures (game, station, number, image, foil_image, foil_is_image, captured_at, '
-                'capture_id, sender, uid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                (game, station, number, image, foil_image, int(bool(foil_is_image)), captured_at, capture_id,
-                 sender, uid)).lastrowid
-            self.conn.commit()
+            try:
+                pending_id = self.conn.execute(
+                    'INSERT INTO pending_captures (game, station, number, image, foil_image, foil_is_image, captured_at, '
+                    'capture_id, sender, uid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    (game, station, number, image, foil_image, int(bool(foil_is_image)), captured_at, capture_id,
+                     sender, uid)).lastrowid
+                self.conn.commit()
+            except sqlite3.IntegrityError:
+                self.conn.rollback()
+                row = self.conn.execute(
+                    "SELECT id, uid FROM pending_captures WHERE COALESCE(sender, station, '') = ? AND capture_id = ?",
+                    (sender or station or '', capture_id)).fetchone()
+                return row['id'], row['uid']
         return pending_id, uid
 
     def remove(self, pending_id):

@@ -3,6 +3,7 @@
 # Backups of what the user made - the collection, the scanned cards and the
 # decks - taken from the collection page (before a big load) and restored there
 # ============================================================================
+import contextlib
 import hashlib
 import json
 import logging
@@ -13,6 +14,7 @@ import sqlite3
 import zipfile
 from zlib import error as zlib_error
 from datetime import datetime
+from pathlib import Path
 
 from config import Config
 from inventory import CAPTURES_DIR
@@ -34,6 +36,16 @@ DECK_TABLES = ('decks', 'deck_cards')
 CAPTURE_NAME = re.compile(r'^[A-Za-z0-9_-]+\.(jpg|jpeg|png)$')  # a capture inside an uploaded backup
 UPLOAD_MAX_BYTES = 2 * 1024 ** 3  # an uploaded backup, unpacked (a 4,600-card one is ~100 MB)
 UPLOAD_MAX_FILES = 200_000
+# restore: the rows of a backup that can stand in the tables as they are now (the constraints of
+# inventory.py / decks.py) - backups made before them may hold entries without copies and rows
+# beside entries or decks that were gone already. {prefix}: 'collection_' / 'scanned_' / ''
+RESTORABLE = {
+    'inventory': 'quantity > 0',
+    'inventory_captures': 'inventory_id IN (SELECT id FROM {prefix}inventory WHERE quantity > 0)',
+    'inventory_sources': 'quantity > 0 AND inventory_id IN (SELECT id FROM {prefix}inventory WHERE quantity > 0)',
+    'decks': '1',
+    'deck_cards': "quantity > 0 AND board IN ('commander', 'main', 'side') AND deck_id IN (SELECT id FROM decks)",
+}
 KEEP_AUTOMATIC = 5  # backups made before a restore; the ones the user makes are kept until deleted
 # The scheduled ones (create_scheduled; marked 'daily' in their info, whatever the interval):
 # how often, and how many are kept, are settings (backup_every_hours, backup_keep) - these are
@@ -250,7 +262,9 @@ def restore(backup_id, inventory, scan_inventory, deck_store):
                             continue
                         manager.conn.executemany(
                             f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})",
-                            (tuple(row) for row in source.execute(f"SELECT {', '.join(columns)} FROM {prefix}{table}")))
+                            (tuple(row) for row in source.execute(
+                                f"SELECT {', '.join(columns)} FROM {prefix}{table} "
+                                f"WHERE {RESTORABLE[table].format(prefix=prefix)}")))
                     manager.conn.commit()
                 except Exception as e:
                     manager.conn.rollback()
@@ -343,6 +357,116 @@ def add_archive(source):
             shutil.rmtree(work, ignore_errors=True)
     logger.info(f"Backup {backup_id} uploaded: {info['cards']} cards, {info['scanned']} scanned, {info['decks']} decks")
     return info
+
+
+# -- Everything, at one moment ------------------------------------------------------------
+#
+# The backups above hold what the user made (collection, scanned cards, decks). A full backup is
+# the server's whole state for moving it or bringing it back after a lost disk: every database
+# file, the files their rows point at, and the settings - taken at ONE moment. Snapshots of the
+# files one after the other are each valid, but together they can show a card in the scanned
+# cards and in the collection, or a capture both waiting and added.
+
+FULL_DIR = BACKUPS_DIR / 'full'
+KEEP_FULL = 2  # each holds a copy of the card database (the pictures are hard links)
+FULL_ID = re.compile(r'^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$')
+
+
+def create_full(managers, barrier, databases, linked, copied=(), keep=KEEP_FULL):
+    """
+    Snapshot every database file and what its rows point at, at one moment.
+
+    managers: the objects that write (each with ._lock) - held, in this order, while the
+        snapshots are taken: nothing of theirs is half way (a move between two files, a capture
+        being settled) and no file they point at is deleted meanwhile;
+    barrier: a lock held by whatever else settles captures or deletes pictures (app.py:
+        maintenance_barrier);
+    databases: the database files; linked: [(folder name in the backup, source folder,
+        database file, SQL giving the file names)] - the pictures the rows point at, as hard
+        links; copied: small files beside them (settings).
+    Afterwards, without the locks, the snapshots are opened and checked and every file a row
+    names is looked for. Returns the manifest (also manifest.json in the folder): 'id',
+    'folder', 'databases' {name: rows per table}, 'files' {folder: count}, 'missing', 'verified'.
+    """
+    created = datetime.now()
+    backup_id = created.strftime('%Y-%m-%d_%H-%M-%S')
+    folder = FULL_DIR / backup_id
+    work = FULL_DIR / f'.{backup_id}.tmp'
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
+    try:
+        with contextlib.ExitStack() as held:
+            held.enter_context(barrier)
+            for manager in managers:
+                held.enter_context(manager._lock)
+            # Held as shortly as the copying takes: nothing is archived or compressed in here
+            for database in databases:
+                source = sqlite3.connect(f'file:{database}?mode=ro', uri=True, timeout=30.0)
+                target = sqlite3.connect(str(work / Path(database).name))
+                try:
+                    source.backup(target)
+                finally:
+                    source.close()
+                    target.close()
+            for name, source_dir, database, sql in linked:
+                (work / name).mkdir(exist_ok=True)
+                snapshot = sqlite3.connect(f'file:{work / Path(database).name}?mode=ro', uri=True)
+                try:
+                    for (file,) in snapshot.execute(sql):
+                        if file:
+                            _link(Path(source_dir) / file, work / name / file)
+                finally:
+                    snapshot.close()
+            for file in copied:
+                if Path(file).is_file():
+                    shutil.copy2(file, work / Path(file).name)
+
+        manifest = {'id': backup_id, 'created': created.strftime('%Y-%m-%d %H:%M:%S'), 'databases': {}, 'files': {},
+                    'missing': [], 'copied': [Path(file).name for file in copied if (work / Path(file).name).is_file()]}
+        for database in databases:
+            snapshot = sqlite3.connect(f'file:{work / Path(database).name}?mode=ro', uri=True)
+            try:
+                if snapshot.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+                    raise BackupError(f'The snapshot of {Path(database).name} cannot be read back')
+                tables = [row[0] for row in snapshot.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
+                manifest['databases'][Path(database).name] = {
+                    table: snapshot.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] for table in tables}
+            finally:
+                snapshot.close()
+        for name, _source_dir, database, sql in linked:
+            snapshot = sqlite3.connect(f'file:{work / Path(database).name}?mode=ro', uri=True)
+            try:
+                named = {file for (file,) in snapshot.execute(sql) if file}
+            finally:
+                snapshot.close()
+            manifest['files'][name] = manifest['files'].get(name, 0) + len(named)
+            manifest['missing'] += sorted(f'{name}/{file}' for file in named if not (work / name / file).is_file())
+        manifest['verified'] = not manifest['missing']
+        (work / 'manifest.json').write_text(json.dumps(manifest, indent=2))
+        os.replace(work, folder)
+    except Exception:
+        shutil.rmtree(work, ignore_errors=True)
+        raise
+    logger.info(f"Full backup {backup_id}: {len(databases)} database files, "
+                f"{sum(manifest['files'].values())} pictures"
+                + (f", {len(manifest['missing'])} pictures missing" if manifest['missing'] else ''))
+    for old in list_full()[max(1, keep):]:
+        shutil.rmtree(FULL_DIR / old['id'], ignore_errors=True)
+    return {**manifest, 'folder': str(folder)}
+
+
+def list_full():
+    """The full backups' manifests, newest first"""
+    found = []
+    if FULL_DIR.is_dir():
+        for folder in sorted(FULL_DIR.iterdir(), reverse=True):
+            if FULL_ID.match(folder.name) and (folder / 'manifest.json').is_file():
+                try:
+                    found.append(json.loads((folder / 'manifest.json').read_text()))
+                except ValueError:
+                    continue
+    return found
 
 
 def delete(backup_id):

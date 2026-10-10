@@ -232,6 +232,13 @@ the vision AI. `scripts/backup.sh` archives `data/`, the capture images and `.en
 `~/scanner-backups/`, and `scripts/start.sh` starts the app after checking the key and the
 card data.
 
+While the server runs, `scripts/backup.sh` asks it for the database snapshots (all files at one
+moment; `SCANNER_URL` if it is not at `http://localhost:5000`), so it can be run at any time -
+also with Docker, from the folder that holds `data/`. To bring such an archive back: stop the
+server, unpack it over the installation's folder (`tar -xzf scanner-backup-<time>.tar.gz`), and
+start the server. This replaces everything with the state of the archive. (Not tried on a whole
+server; the snapshots themselves are checked when they are made.)
+
 ```bash
 sudo systemctl status mtg-scanner       # is it running?
 journalctl -u mtg-scanner -f            # live logs (the app also writes data/logs/)

@@ -44,6 +44,7 @@ if [ -e "$BACKUP_DIR/$BACKUP_FILE" ]; then
 fi
 
 STAGING=$(mktemp -d)
+SNAPSHOT_ALSO=()
 trap 'rm -rf "$STAGING"' EXIT
 
 fail() {
@@ -52,11 +53,31 @@ fail() {
     exit 1
 }
 
-# The databases may be in use (the app writes them in WAL mode): archive a consistent
-# snapshot of each instead of the live files
+# The databases may be in use (the app writes them in WAL mode). While the server runs it is
+# asked for a full backup: every database file and the pictures their rows point at, taken at
+# one moment (a card being moved or a capture being added is in none or all of them). Without a
+# server - stopped, or one that does not know the request - each file is snapshot on its own,
+# which is the same thing when nothing is running.
 mkdir -p "$STAGING/data"
-for db in data/*.db; do
-    [ -f "$db" ] || continue
+SERVER_URL="${SCANNER_URL:-http://localhost:5000}"
+ANSWER=$(curl -fsS -m 300 -X POST "$SERVER_URL/api/backups/full" 2>/dev/null || true)
+FULL=$(printf '%s' "$ANSWER" | python3 -c 'import json, sys; print(json.load(sys.stdin)["backup"]["id"])' 2>/dev/null || true)
+if [ -n "$FULL" ] && [ -d "data/backups/full/$FULL" ]; then
+    print_info "The running server took a coordinated snapshot ($FULL)"
+    MISSING=$(printf '%s' "$ANSWER" | python3 -c 'import json, sys; print(len(json.load(sys.stdin)["backup"]["missing"]))' 2>/dev/null || echo 0)
+    [ "$MISSING" = "0" ] || print_warn "$MISSING pictures the databases name are not on disk (listed in data/full_backup_manifest.json)"
+    cp "data/backups/full/$FULL"/*.db "$STAGING/data/" || fail "could not read the server's snapshot"
+    cp "data/backups/full/$FULL/manifest.json" "$STAGING/data/full_backup_manifest.json"
+    for db in data/*.db; do   # files the server does not snapshot (the web cache: fetched again when missing)
+        if [ -f "$db" ] && [ ! -f "$STAGING/$db" ]; then SNAPSHOT_ALSO+=("$db"); fi
+    done
+else
+    print_warn "No running server at $SERVER_URL: each database file is snapshot on its own"
+    for db in data/*.db; do
+        if [ -f "$db" ]; then SNAPSHOT_ALSO+=("$db"); fi
+    done
+fi
+for db in "${SNAPSHOT_ALSO[@]}"; do
     python3 - "$db" "$STAGING/$db" <<'PYTHON' || fail "could not snapshot $db"
 import sqlite3, sys
 source = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True, timeout=30)
@@ -79,6 +100,8 @@ ARCHIVE="$BACKUP_DIR/${BACKUP_FILE%.gz}"
 trap 'rm -rf "$STAGING" "$ARCHIVE"' EXIT
 tar -cf "$ARCHIVE" \
     --exclude='data/logs' \
+    --exclude='data/backups/full' \
+    --exclude='data/backups/migrations' \
     --exclude='data/*.db' \
     --exclude='data/*.db-wal' \
     --exclude='data/*.db-shm' \

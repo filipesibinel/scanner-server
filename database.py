@@ -11,6 +11,7 @@ import requests
 import threading
 from datetime import datetime
 from difflib import SequenceMatcher, get_close_matches
+import storage
 from config import Config
 from utils import normalize_text
 
@@ -185,6 +186,7 @@ class CardDatabase:
 
     def __init__(self, db_file=None):
         self.db_file = db_file or Config.DATABASE_FILE
+        self._import_lock = threading.Lock()  # populate_database: one refresh at a time
         self.conn = None
         self._lock = threading.RLock()  # Thread-safe database access
         self.initialize_database()
@@ -192,17 +194,7 @@ class CardDatabase:
     def initialize_database(self):
         """Create database tables if they don't exist"""
         logger.info(f"Initializing database: {self.db_file}")
-        self.conn = sqlite3.connect(
-            str(self.db_file),
-            check_same_thread=False,
-            isolation_level='DEFERRED',  # Standardized isolation level
-            timeout=10.0  # Add timeout for lock waits
-        )
-        # Enable WAL mode for better concurrency
-        self.conn.execute('PRAGMA journal_mode=WAL')
-        self.conn.execute('PRAGMA synchronous=NORMAL')
-
-        self.conn.row_factory = sqlite3.Row  # Access columns by name
+        self.conn = storage.connect(self.db_file)  # WAL, rows by column name - as every manager's
 
         cursor = self.conn.cursor()
         self._create_cards_table(cursor, if_not_exists=True)
@@ -373,14 +365,36 @@ class CardDatabase:
         if progress_callback:
             progress_callback(f"Populating database with {len(cards_data)} cards...")
         
+        # One refresh at a time: a second one would drop the table the first is filling
+        if not self._import_lock.acquire(blocking=False):
+            raise RuntimeError('The card data is being updated already')
+        try:
+            return self._populate(cards_data, progress_callback)
+        finally:
+            self._import_lock.release()
+
+    def _populate(self, cards_data, progress_callback):
         # Filled beside the current table and swapped in at the end (replace_table): scanning
-        # keeps working on the old data meanwhile
-        with self._lock:
-            cursor = self.conn.cursor()
+        # keeps working on the old data meanwhile. On a connection of its own - its commits
+        # every few thousand rows must not commit whatever else has the shared one open
+        importer = storage.connect(self.db_file)
+        try:
+            cursor = importer.cursor()
             cursor.execute('DROP TABLE IF EXISTS cards_import')
             self._create_cards_table(cursor, table='cards_import')
-            self.conn.commit()
+            importer.commit()
+            inserted = self._fill_import(importer, cursor, cards_data, progress_callback)
+        finally:
+            importer.close()
 
+        # The new cards and what is known about them go in together (or neither)
+        self.replace_table('cards_import', 'cards', self._create_card_indexes,
+                           info=('mtg', getattr(self, 'last_download_source', None), inserted))
+        if progress_callback:
+            progress_callback(f"Database populated with {inserted} cards!")
+        return inserted
+
+    def _fill_import(self, importer, cursor, cards_data, progress_callback):
         inserted = 0
         for card in cards_data:
             try:
@@ -434,7 +448,7 @@ class CardDatabase:
                 inserted += 1
                 if inserted % 5000 == 0:
                     # Short transactions: the inventory (own connection) can still write
-                    self.conn.commit()
+                    importer.commit()
                     if progress_callback:
                         progress_callback(f"Inserted {inserted} cards...")
             
@@ -443,12 +457,7 @@ class CardDatabase:
                     progress_callback(f"Error inserting card {card.get('name')}: {e}")
                 continue
         
-        # The new cards and what is known about them go in together (or neither)
-        self.replace_table('cards_import', 'cards', self._create_card_indexes,
-                           info=('mtg', getattr(self, 'last_download_source', None), inserted))
-        if progress_callback:
-            progress_callback(f"Database populated with {inserted} cards!")
-        
+        importer.commit()
         return inserted
     
     def search_card_exact(self, card_name, collector_number=None, set_code=None):

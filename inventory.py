@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+import storage
 from config import Config
 from database import search_key
 from pending import APPLIED_CAPTURES_TABLE, prune_applied
@@ -48,17 +49,42 @@ INVENTORY_TABLE = '''
         colors TEXT,
         color_identity TEXT,
         price_usd REAL,
-        quantity INTEGER NOT NULL DEFAULT 1,
+        quantity INTEGER NOT NULL DEFAULT 1 CHECK (typeof(quantity) = 'integer' AND quantity > 0),
         condition TEXT NOT NULL DEFAULT 'Near Mint',
         finish TEXT NOT NULL DEFAULT 'regular',
         timestamp TEXT NOT NULL,
         location TEXT NOT NULL DEFAULT '',
         tags TEXT NOT NULL DEFAULT '',
         added_at TEXT,
-        added_quantity INTEGER,
+        added_quantity INTEGER CHECK (added_quantity IS NULL OR (typeof(added_quantity) = 'integer' AND added_quantity >= 0)),
         UNIQUE(game, card_name, set_name, card_number, condition, finish, location)
     )
 '''
+# Beside the entries, and gone with them (ON DELETE CASCADE - on connections from
+# storage.connect, which enforce it): one row per captured copy with its thumbnail file, and how
+# many of an entry's copies each station added. An entry with no copies left is deleted, never
+# kept at 0: lower a quantity to nothing by deleting the row (_delete_entries), not by UPDATE.
+CAPTURES_TABLE = '''
+    CREATE TABLE {table} (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        inventory_id INTEGER NOT NULL REFERENCES inventory(id) ON DELETE CASCADE,
+        file TEXT NOT NULL,
+        captured_at TEXT NOT NULL,
+        station TEXT
+    )
+'''
+SOURCES_TABLE = '''
+    CREATE TABLE {table} (
+        inventory_id INTEGER NOT NULL REFERENCES inventory(id) ON DELETE CASCADE,
+        station TEXT NOT NULL,
+        quantity INTEGER NOT NULL CHECK (typeof(quantity) = 'integer' AND quantity > 0),
+        PRIMARY KEY (inventory_id, station)
+    )
+'''
+INVENTORY_INDEXES = ('CREATE INDEX IF NOT EXISTS idx_inventory_game_name ON inventory(game, card_name COLLATE NOCASE)',
+                     'CREATE INDEX IF NOT EXISTS idx_inventory_timestamp ON inventory(timestamp DESC)')
+CAPTURES_INDEXES = ('CREATE INDEX IF NOT EXISTS idx_captures_entry ON inventory_captures(inventory_id)',)
+CONSTRAINTS_MIGRATION = 'inventory_constraints_1'
 KEY_COLUMNS = ('game', 'card_name', 'set_name', 'card_number', 'condition', 'finish', 'location')
 UPSERT = '''
     INSERT INTO inventory (game, card_id, card_name, set_name, set_code, card_number, rarity,
@@ -180,11 +206,9 @@ class InventoryManager:
         # source None is the scanner page; a station (stations.py) is its id
         self.last_added = {}
         self._doomed = []  # thumbnails of captures deleted in the open transaction (_commit)
-        self.conn = sqlite3.connect(str(self.db_file), check_same_thread=False, timeout=10.0)
-        self.conn.execute('PRAGMA journal_mode=WAL')
-        self.conn.execute('PRAGMA synchronous=NORMAL')
-        self.conn.row_factory = sqlite3.Row
+        self.conn = storage.connect(self.db_file)
         self._initialize_table()
+        self._add_constraints()
 
     def _commit(self):
         """Commit, and only then delete the thumbnails of the captures that went with it: rolled
@@ -210,6 +234,7 @@ class InventoryManager:
     def _initialize_table(self):
         with self._lock:
             columns = {row['name'] for row in self.conn.execute("PRAGMA table_info(inventory)")}
+            new_file = not columns
             if not columns:
                 self.conn.execute(INVENTORY_TABLE.format(table='inventory'))
             elif 'finish' not in columns:
@@ -222,29 +247,23 @@ class InventoryManager:
             if 'added_quantity' not in columns:
                 self.conn.execute('ALTER TABLE inventory ADD COLUMN added_quantity INTEGER')
             self.conn.execute('UPDATE inventory SET added_at = timestamp WHERE added_at IS NULL')
-            self.conn.execute('CREATE INDEX IF NOT EXISTS idx_inventory_game_name ON inventory(game, card_name COLLATE NOCASE)')
-            self.conn.execute('CREATE INDEX IF NOT EXISTS idx_inventory_timestamp ON inventory(timestamp DESC)')
-            # One row per captured copy: which entry it belongs to and its thumbnail file
-            self.conn.execute('''
-                CREATE TABLE IF NOT EXISTS inventory_captures (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    inventory_id INTEGER NOT NULL,
-                    file TEXT NOT NULL,
-                    captured_at TEXT NOT NULL
-                )''')
-            self.conn.execute('CREATE INDEX IF NOT EXISTS idx_captures_entry ON inventory_captures(inventory_id)')
-            # Which camera scanned what (the scanned cards' camera filter): the station a capture
-            # came from, and how many of an entry's copies each station added. Entries merge
-            # across cameras, so this is kept beside them, not in them
-            if 'station' not in {row['name'] for row in self.conn.execute('PRAGMA table_info(inventory_captures)')}:
+            for index in INVENTORY_INDEXES:
+                self.conn.execute(index)
+            # One row per captured copy (its entry, its thumbnail file, the station it came
+            # from), and how many of an entry's copies each station added (the scanned cards'
+            # camera filter): entries merge across cameras, so this is kept beside them
+            tables = {row['name'] for row in self.conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            if 'inventory_captures' not in tables:
+                self.conn.execute(CAPTURES_TABLE.format(table='inventory_captures'))
+            elif 'station' not in {row['name'] for row in self.conn.execute('PRAGMA table_info(inventory_captures)')}:
                 self.conn.execute('ALTER TABLE inventory_captures ADD COLUMN station TEXT')
-            self.conn.execute('''
-                CREATE TABLE IF NOT EXISTS inventory_sources (
-                    inventory_id INTEGER NOT NULL,
-                    station TEXT NOT NULL,
-                    quantity INTEGER NOT NULL,
-                    PRIMARY KEY (inventory_id, station)
-                )''')
+            for index in CAPTURES_INDEXES:
+                self.conn.execute(index)
+            if 'inventory_sources' not in tables:
+                self.conn.execute(SOURCES_TABLE.format(table='inventory_sources'))
+            if new_file:
+                # A new file is made with the constraints: nothing to migrate
+                storage.record(self.conn, CONSTRAINTS_MIGRATION, 'new file')
             self.conn.execute(PENDING_MOVES_TABLE)
             if 'station' not in {row['name'] for row in self.conn.execute('PRAGMA table_info(pending_moves)')}:
                 self.conn.execute('ALTER TABLE pending_moves ADD COLUMN station TEXT')
@@ -263,6 +282,37 @@ class InventoryManager:
                 logger.warning(f"{row['card_name']} (entry {row['id']}): its cameras claimed {row['claimed']} of "
                                f"{row['quantity']} copies - lowered to {row['quantity']}")
             self._commit()
+
+    def _add_constraints(self):
+        """
+        Files from before the constraints (see CAPTURES_TABLE): the three tables are rebuilt
+        with them, once (storage.rebuild: backup, one transaction, checked). Left out are only
+        rows that mean nothing - entries with no copies, captures and station rows of entries
+        that are gone or of no copies - and the totals of everything else must be unchanged.
+        """
+        with self._lock:
+            self._commit()
+            valid = 'inventory_id IN (SELECT id FROM inventory WHERE CAST(quantity AS INTEGER) > 0)'
+
+            def facts(conn):
+                return (tuple(conn.execute('SELECT COUNT(*), COALESCE(SUM(CAST(quantity AS INTEGER)), 0), COALESCE(MAX(id), 0) '
+                                           'FROM inventory WHERE CAST(quantity AS INTEGER) > 0').fetchone()),
+                        tuple(conn.execute(f'SELECT COUNT(*), COALESCE(MAX(id), 0) FROM inventory_captures WHERE {valid}').fetchone()),
+                        tuple(conn.execute('SELECT COUNT(*), COALESCE(SUM(CAST(quantity AS INTEGER)), 0) FROM inventory_sources '
+                                           f'WHERE {valid} AND CAST(quantity AS INTEGER) > 0').fetchone()))
+            columns = [row['name'] for row in self.conn.execute('PRAGMA table_info(inventory)')]
+            entry = ', '.join('CAST(quantity AS INTEGER)' if column == 'quantity'
+                              else 'CASE WHEN added_quantity IS NULL THEN NULL ELSE MAX(0, CAST(added_quantity AS INTEGER)) END'
+                              if column == 'added_quantity' else column for column in columns)
+            storage.rebuild(self.db_file, CONSTRAINTS_MIGRATION, [
+                ('inventory', INVENTORY_TABLE, f'SELECT {entry} FROM inventory WHERE CAST(quantity AS INTEGER) > 0',
+                 INVENTORY_INDEXES),
+                ('inventory_captures', CAPTURES_TABLE,
+                 f'SELECT id, inventory_id, file, captured_at, station FROM inventory_captures WHERE {valid}', CAPTURES_INDEXES),
+                ('inventory_sources', SOURCES_TABLE,
+                 'SELECT inventory_id, station, CAST(quantity AS INTEGER) FROM inventory_sources '
+                 f'WHERE {valid} AND CAST(quantity AS INTEGER) > 0', ()),
+            ], facts)
 
     def _backup_table(self, label):
         """Copy the inventory table to data/backups/ before rebuilding it; returns the file and
@@ -385,18 +435,45 @@ class InventoryManager:
             self.conn.execute('DELETE FROM inventory_captures WHERE id = ?', (row['id'],))
             self._doomed.append(row['file'])  # the file goes when this is committed
 
-    def _drop_orphans(self):
-        """What stood beside entries that are gone: their captures, and which station scanned
-        them. Called by everything that deletes entries, in its transaction - not when reading:
-        a DELETE in _station_rows once left every filtered list holding a write transaction,
-        and another connection's write failed with "database is locked"."""
-        self._delete_captures('inventory_id NOT IN (SELECT id FROM inventory)')
-        self.conn.execute('DELETE FROM inventory_sources WHERE inventory_id NOT IN (SELECT id FROM inventory)')
+    def _delete_entries(self, where, params=()):
+        """
+        Delete the entries matching a condition on `inventory`, with what stands beside them:
+        their captures (thumbnails included - the foreign key would take the rows along, but
+        not the files) and which station scanned them. Returns how many entries went.
+        """
+        ids = f'inventory_id IN (SELECT id FROM inventory WHERE {where})'
+        self._delete_captures(ids, params)
+        self.conn.execute(f'DELETE FROM inventory_sources WHERE {ids}', params)
+        return self.conn.execute(f'DELETE FROM inventory WHERE {where}', params).rowcount
+
+    def _take_copies(self, row_id, copies):
+        """An entry loses copies (also the ones its latest batch brought): deleted when none
+        are left - a row is never kept at 0"""
+        row = self._get_row(row_id)
+        if not row:
+            return
+        if copies >= row['quantity']:
+            self._delete_entries('id = ?', (row_id,))
+        else:
+            self.conn.execute('UPDATE inventory SET quantity = quantity - ?, '
+                              'added_quantity = MAX(0, COALESCE(added_quantity, quantity) - ?) WHERE id = ?',
+                              (copies, copies, row_id))
+
+    def _set_source(self, row_id, station, quantity):
+        """How many of an entry's copies a station added - no row for none"""
+        if quantity > 0:
+            self.conn.execute('''INSERT INTO inventory_sources (inventory_id, station, quantity) VALUES (?, ?, ?)
+                                 ON CONFLICT(inventory_id, station) DO UPDATE SET quantity = excluded.quantity''',
+                              (row_id, station, quantity))
+        else:
+            self.conn.execute('DELETE FROM inventory_sources WHERE inventory_id = ? AND station = ?', (row_id, station))
 
     def _station_rows(self, game, station):
         """
         [(inventory row, copies)] of a game's entries a station added copies of: as many as it
-        added, at most what the entry still has (copies removed since are nobody's). Only reads.
+        added, at most what the entry still has (copies removed since are nobody's). Only reads:
+        a DELETE of leftovers here once left every filtered list holding a write transaction,
+        and another connection's write failed with "database is locked".
         """
         return [(row, min(row['station_copies'], row['quantity'])) for row in self.conn.execute(
             '''SELECT i.*, s.quantity AS station_copies FROM inventory i
@@ -456,12 +533,10 @@ class InventoryManager:
                     too_many -= 1
         for station, copies in moving.items():
             if copies:
-                self.conn.execute('UPDATE inventory_sources SET quantity = quantity - ? WHERE inventory_id = ? AND station = ?',
-                                  (copies, from_id, station))
+                self._set_source(from_id, station, owned[station] - copies)
                 self.conn.execute("""INSERT INTO inventory_sources (inventory_id, station, quantity) VALUES (?, ?, ?)
                                      ON CONFLICT(inventory_id, station) DO UPDATE SET quantity = quantity + excluded.quantity""",
                                   (to_id, station, copies))
-        self.conn.execute('DELETE FROM inventory_sources WHERE quantity <= 0')
 
     def _trim_sources(self, row_id, quantity):
         """
@@ -489,9 +564,7 @@ class InventoryManager:
                 owned[station] -= 1
                 too_many -= 1
         for station, copies in owned.items():
-            self.conn.execute('UPDATE inventory_sources SET quantity = ? WHERE inventory_id = ? AND station = ?',
-                              (copies, row_id, station))
-        self.conn.execute('DELETE FROM inventory_sources WHERE quantity <= 0')
+            self._set_source(row_id, station, copies)
 
     def _trim_captures(self, row_id, quantity):
         """No more captures than copies: when copies are removed, the newest captures go -
@@ -588,17 +661,13 @@ class InventoryManager:
             row = self.conn.execute('SELECT card_name FROM inventory WHERE id = ?', (row_id,)).fetchone()
             if not row:
                 return None
-            self.conn.execute('UPDATE inventory SET quantity = quantity - ?, '
-                              'added_quantity = MAX(0, COALESCE(added_quantity, quantity) - ?) WHERE id = ?',
-                              (quantity, quantity, row_id))
-            self.conn.execute('DELETE FROM inventory WHERE id = ? AND quantity <= 0', (row_id,))
             if source:
-                self.conn.execute('UPDATE inventory_sources SET quantity = quantity - ? WHERE inventory_id = ? AND station = ?',
-                                  (quantity, row_id, source))
-                self.conn.execute('DELETE FROM inventory_sources WHERE quantity <= 0')
+                had = self.conn.execute('SELECT quantity FROM inventory_sources WHERE inventory_id = ? AND station = ?',
+                                        (row_id, source)).fetchone()
+                self._set_source(row_id, source, (had['quantity'] if had else 0) - quantity)
             if capture_id:
                 self._delete_captures('id = ?', (capture_id,))
-            self._drop_orphans()
+            self._take_copies(row_id, quantity)
             self._commit()
         self.log(f"Undid add: {quantity}x {row['card_name']}")
         return row['card_name']
@@ -699,8 +768,7 @@ class InventoryManager:
             row = self._get_row(row_id)
             if not row:
                 return False
-            self.conn.execute('DELETE FROM inventory WHERE id = ?', (row_id,))
-            self._drop_orphans()
+            self._delete_entries('id = ?', (row_id,))
             self._commit()
         if not quiet:
             self.log(f"Deleted from inventory: {row['card_name']}", level="success")
@@ -736,14 +804,35 @@ class InventoryManager:
         if price is not None:
             values['price_usd'] = price
         values.pop('id')
+        key = (f"SELECT * FROM inventory WHERE {' AND '.join(c + ' = ?' for c in KEY_COLUMNS)}", [values[c] for c in KEY_COLUMNS])
+        there = self.conn.execute(*key).fetchone()
         self.conn.execute(UPSERT, values)
-        target = self.conn.execute(
-            f"SELECT id FROM inventory WHERE {' AND '.join(c + ' = ?' for c in KEY_COLUMNS)}",
-            [values[c] for c in KEY_COLUMNS]).fetchone()['id']
+        target = self.conn.execute(*key).fetchone()['id']
+        self._move_batch(row, target, there, quantity)
         self._add_tags(target, values['tags'])
         self._move_sources(row['id'], target, quantity)
         self._move_captures(row['id'], target, quantity)
         return target
+
+    def _move_batch(self, row, target, there, quantity):
+        """
+        `quantity` copies of an entry (`row`, as it was) went to another one (`target`; `there`:
+        that entry before, None when it is new): which of them belong to the entry's latest
+        "Add to collection" goes along, so taking that batch back removes what it brought and
+        no more. The copies that move are the newest, so they are the batch's first. An entry
+        knows one batch only: where the target has one of its own, the newer of the two stays.
+        """
+        of_batch = min(quantity, batch_quantity(row))
+        self.conn.execute('UPDATE inventory SET added_quantity = ? WHERE id = ?', (batch_quantity(row) - of_batch, row['id']))
+        if there is None:
+            added = (row['added_at'], of_batch)
+        elif there['added_at'] == row['added_at']:
+            added = (row['added_at'], batch_quantity(there) + of_batch)
+        elif (row['added_at'] or '') > (there['added_at'] or ''):
+            added = (row['added_at'], of_batch)
+        else:
+            added = (there['added_at'], batch_quantity(there))
+        self.conn.execute('UPDATE inventory SET added_at = ?, added_quantity = ? WHERE id = ?', (*added, target))
 
     @_writes
     def update_card(self, row_id, quantity=None, condition=None, finish=None, split_quantity=None,
@@ -789,8 +878,7 @@ class InventoryManager:
                     self.conn.execute('UPDATE inventory SET quantity = ? WHERE id = ?', (remaining, row_id))
                     self._trim_captures(row_id, remaining)
                 else:
-                    self.conn.execute('DELETE FROM inventory WHERE id = ?', (row_id,))
-                    self._drop_orphans()
+                    self._delete_entries('id = ?', (row_id,))
                 self._commit()
                 if not quiet:
                     where = ', '.join(part for part in (
@@ -809,10 +897,11 @@ class InventoryManager:
                 self._move_sources(row_id, twin['id'], new_quantity if new_quantity < row['quantity'] else None)
                 self._trim_captures(row_id, new_quantity)
                 self._move_captures(row_id, twin['id'])
+                there = self._get_row(twin['id'])
                 self.conn.execute('UPDATE inventory SET quantity = quantity + ? WHERE id = ?', (new_quantity, twin['id']))
+                self._move_batch(row, twin['id'], there, new_quantity)
                 self._add_tags(twin['id'], new_tags)
-                self.conn.execute('DELETE FROM inventory WHERE id = ?', (row_id,))
-                self._drop_orphans()
+                self._delete_entries('id = ?', (row_id,))  # its captures and stations went to the twin
             else:
                 self.conn.execute('UPDATE inventory SET quantity = ?, condition = ?, finish = ?, price_usd = ?, '
                                   'location = ?, tags = ? WHERE id = ?',
@@ -933,21 +1022,14 @@ class InventoryManager:
         a crash in between - finish_interrupted_moves comes here too)"""
         if station:
             for row, copies in source._station_rows(game, station):
-                source.conn.execute(
-                    'UPDATE inventory SET quantity = quantity - ?, '
-                    'added_quantity = MAX(0, COALESCE(added_quantity, quantity) - ?) WHERE id = ?',
-                    (copies, copies, row['id']))
                 source.conn.execute('DELETE FROM inventory_captures WHERE inventory_id = ? AND station = ?',
                                     (row['id'], station))
-            source.conn.execute('DELETE FROM inventory_sources WHERE station = ? AND inventory_id IN '
-                                '(SELECT id FROM inventory WHERE game = ?)', (station, game))
-            source.conn.execute('DELETE FROM inventory WHERE game = ? AND quantity <= 0', (game,))
-            source._drop_orphans()
+                source._set_source(row['id'], station, 0)
+                source._take_copies(row['id'], copies)
         else:
             source.conn.execute('DELETE FROM inventory_captures WHERE inventory_id IN '
                                 '(SELECT id FROM inventory WHERE game = ?)', (game,))
-            source.conn.execute('DELETE FROM inventory WHERE game = ?', (game,))
-            source._drop_orphans()
+            source._delete_entries('game = ?', (game,))
         source.conn.execute('DELETE FROM pending_moves WHERE game = ?', (game,))
         source._commit()
         if station:
@@ -1000,7 +1082,7 @@ class InventoryManager:
                 cards += added
                 entries += 1
                 if added >= row['quantity']:
-                    self.conn.execute('DELETE FROM inventory WHERE id = ?', (row['id'],))
+                    self._delete_entries('id = ?', (row['id'],))
                 else:
                     # What is left was there before: part of no batch (when it came is not
                     # known any more), so removing a batch again never takes it
@@ -1008,7 +1090,6 @@ class InventoryManager:
                                       'WHERE id = ?', (added, row['id']))
                     self._trim_sources(row['id'], row['quantity'] - added)
                     self._trim_captures(row['id'], row['quantity'] - added)
-            self._drop_orphans()
             self._commit()
             self.last_added = {}
         self.log(f"Removed the cards added {added_at}: {cards} cards ({entries} entries)", level="success")
@@ -1025,15 +1106,9 @@ class InventoryManager:
                 with self._lock:
                     rows = self._station_rows(game, station)
                     for row, copies in rows:
-                        self.conn.execute(
-                            'UPDATE inventory SET quantity = quantity - ?, '
-                            'added_quantity = MAX(0, COALESCE(added_quantity, quantity) - ?) WHERE id = ?',
-                            (copies, copies, row['id']))
                         self._delete_captures('inventory_id = ? AND station = ?', (row['id'], station))
-                    self.conn.execute('DELETE FROM inventory_sources WHERE station = ? AND inventory_id IN '
-                                      '(SELECT id FROM inventory WHERE game = ?)', (station, game))
-                    self.conn.execute('DELETE FROM inventory WHERE game = ? AND quantity <= 0', (game,))
-                    self._drop_orphans()
+                        self._set_source(row['id'], station, 0)
+                        self._take_copies(row['id'], copies)
                     self._commit()
                     self.last_added.pop(station, None)
                 deleted = sum(copies for _, copies in rows)
@@ -1046,8 +1121,7 @@ class InventoryManager:
         where, params = ('WHERE game = ?', (game,)) if game else ('', ())
         try:
             with self._lock:
-                deleted = self.conn.execute(f'DELETE FROM inventory {where}', params).rowcount
-                self._drop_orphans()
+                deleted = self._delete_entries('game = ?' if game else '1', params)
                 self._commit()
                 self.last_added = {}
             self.log(f"Inventory cleared: {deleted} entries removed", level="success")
@@ -1085,8 +1159,7 @@ class InventoryManager:
             return {**stats, 'success': False, 'error': 'No card of the file could be imported - the inventory was not replaced'}
         with self._lock:
             if replace_existing:
-                self.conn.execute('DELETE FROM inventory WHERE game = ?', (game,))
-                self._drop_orphans()
+                self._delete_entries('game = ?', (game,))
                 self.last_added = {}
             for entry in entries:
                 fields = entry['fields']
@@ -1192,8 +1265,7 @@ class InventoryManager:
 
         with self._lock:
             if replace_existing:
-                self.conn.execute('DELETE FROM inventory WHERE game = ?', (game,))
-                self._drop_orphans()
+                self._delete_entries('game = ?', (game,))
                 self.last_added = {}
             for values in accepted:
                 exists = self.conn.execute(

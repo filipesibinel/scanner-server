@@ -226,7 +226,7 @@ from settings import Settings
 from card_ocr import CardOcr
 from identification import Identification
 from stations import Stations, StationSettings
-from pending import PendingCaptures
+from pending import PENDING_FILE, PendingCaptures
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -257,6 +257,9 @@ capture_outcomes = collections.OrderedDict()
 # Captures by the id their sender gave them, so one sent twice (no answer the first time) is
 # one capture: {capture id: (station id, capture number)}
 seen_captures = collections.OrderedDict()
+# Held while a capture's result is applied and while old pictures are cleaned away - and by a
+# full backup (backups.create_full), which must see neither half done
+maintenance_barrier = threading.RLock()
 capture_accept_lock = threading.Lock()  # station_capture: is this capture known? - no: it is now
 capture_outcomes_lock = threading.Lock()
 debug_mode_running = Config.DEBUG  # Flask's debug mode as this process was started (main)
@@ -684,7 +687,7 @@ def submit_capture(image_path, image, foil_image, number, game_id, station=None,
     queue_changed(+1)
 
     def identified(card_info, seconds):
-        with in_desk(owner):
+        with maintenance_barrier, in_desk(owner):
             kept = False
             try:
                 settling.uid = uid  # the add / review item notes it: applied once, whatever is read again
@@ -1213,6 +1216,43 @@ def set_backup_schedule():
         app_settings.set(key, value)
     logger.info(f"Automatic backups: {backup_schedule()}")
     return jsonify({'success': True, 'schedule': backup_schedule()})
+
+
+def inventory_captures_dir():
+    import inventory as inventory_module  # read when asked: the tests point it elsewhere
+    return inventory_module.CAPTURES_DIR
+
+
+def full_backup():
+    """Everything the server keeps, at one moment (backups.create_full): the manifest"""
+    pictures = 'SELECT file FROM inventory_captures'
+    return backups.create_full(
+        managers=[inventory, scan_inventory, deck_store, review, pending, database],  # the order take_from locks in
+        barrier=maintenance_barrier,
+        databases=[Config.DATABASE_FILE, SCAN_INVENTORY_FILE, PENDING_FILE],
+        linked=[('captures', inventory_captures_dir(), Config.DATABASE_FILE, pictures),
+                ('captures', inventory_captures_dir(), SCAN_INVENTORY_FILE, pictures),
+                ('review', REVIEW_DIR, Config.DATABASE_FILE, 'SELECT file FROM review_queue'),
+                ('scanned_cards', Config.IMAGES_DIR, PENDING_FILE, 'SELECT image FROM pending_captures'),
+                ('scanned_cards', Config.IMAGES_DIR, PENDING_FILE, 'SELECT foil_image FROM pending_captures')],
+        copied=[Config.DATA_DIR / name for name in ('settings.json', 'stations.json', 'prompts.json', 'api_keys.env')])
+
+
+@app.route('/api/backups/full', methods=['GET', 'POST'])
+def full_backups():
+    """
+    The full backups (GET), or make one (POST): every database file and the pictures their rows
+    point at, taken at one moment, in data/backups/full/<date_time>/ - what scripts/backup.sh
+    archives while the server runs. Not restored from the web interface (INSTALL.md).
+    """
+    if request.method == 'POST':
+        try:
+            made = full_backup()
+        except Exception as e:
+            logger.error(f"The full backup failed: {e}", exc_info=True)
+            return jsonify({'success': False, 'error': f'The full backup failed: {e}'}), 500
+        return jsonify({'success': True, 'backup': made})
+    return jsonify({'success': True, 'backups': backups.list_full()})
 
 
 @app.route('/api/backups', methods=['GET', 'POST'])
@@ -3365,7 +3405,8 @@ def run_cleanup_background():
                 return
 
             # Clean up images older than configured days
-            files_deleted, space_freed = cleanup_old_images(days_to_keep=Config.CLEANUP_DAYS)
+            with maintenance_barrier:  # not while a full backup is collecting the pictures
+                files_deleted, space_freed = cleanup_old_images(days_to_keep=Config.CLEANUP_DAYS)
 
             if files_deleted > 0:
                 logger.info(f"Cleanup complete: Deleted {files_deleted} old images, freed {space_freed:.2f} MB")

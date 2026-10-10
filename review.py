@@ -14,6 +14,7 @@ import threading
 import uuid
 from datetime import datetime
 
+import storage
 from config import Config
 from pending import APPLIED_CAPTURES_TABLE, prune_applied
 
@@ -26,8 +27,7 @@ ANY = object()
 
 class ReviewQueue:
     def __init__(self, db_file=None):
-        self.conn = sqlite3.connect(str(db_file or Config.DATABASE_FILE), check_same_thread=False, timeout=10.0)
-        self.conn.row_factory = sqlite3.Row
+        self.conn = storage.connect(db_file or Config.DATABASE_FILE)
         self._lock = threading.RLock()
         with self._lock:
             self.conn.execute('''

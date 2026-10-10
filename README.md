@@ -375,7 +375,8 @@ games/               Card games: base.py (interface), mtg.py (Magic), mtg_decks.
 inventory.py         Inventory: add, merge, undo, edit, locations, tags, cameras, import / export
 decks.py             Decks (lists of cards; the inventory says what is owned)
 recommendations.py   Deck ideas from EDHREC, MTGJSON, Archidekt and Moxfield (cached)
-backups.py           Backups of the collection, scanned cards and decks
+backups.py           Backups of the collection, scanned cards and decks; full backups
+storage.py           Database connections and migrations
 station_client.py    Camera station: runs next to the camera, talks to the server
 scanner.py           Camera capture thread, detection, stability, auto-capture, focus
 object_detector.py   Card outline detection + perspective correction
@@ -426,6 +427,7 @@ those to one camera.
 | `GET /api/export_inventory/<format>` | Download the inventory: `moxfield` (Magic), `csv` (the app's own, every column) |
 | `POST /api/import_inventory` | Import a collection CSV (multipart `file`, `replace_existing`): Moxfield, or the app's own columns |
 | `GET /api/backups`, `POST /api/backups`, `POST /api/backups/schedule` | List the backups (and the automatic backups' settings); make one (JSON: `note`); set how often automatic backups are made and how many are kept (JSON: `every_hours`, `keep`) |
+| `GET /api/backups/full`, `POST /api/backups/full` | The full backups; make one: every database file and the pictures they point at, taken at one moment, in `data/backups/full/` (what `scripts/backup.sh` archives) |
 | `GET /api/backups/<id>/download`, `POST /api/backups/upload` | A backup as a zip file, to keep elsewhere; add such a file to the list again (multipart `file`; nothing is restored by it) |
 | `POST /api/backups/<id>/restore`, `DELETE /api/backups/<id>` | Put the collection, scanned cards and decks back as in a backup (the current state is backed up first); delete a backup |
 | `GET /api/cards/search`, `GET /api/cards/printings?name=` | Deck builder card search; every printing of a card with the copies owned |

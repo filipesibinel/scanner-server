@@ -94,7 +94,8 @@ inside `app.py` or inside `station_client.py`.
 | `inventory.py` | server | Inventory table for every game: schema + migration, add (merging duplicates), undo, edit / split, bulk edits, locations and tags, which station scanned what, move to the collection, CSV import / export |
 | `decks.py`, `games/mtg_decks.py` | server | Decks (`decks`, `deck_cards`): lists of card names; formats, deck checks, text decklists |
 | `recommendations.py` | server | Deck ideas from EDHREC, MTGJSON, Archidekt and Moxfield, cached in `data/web_cache.db` |
-| `backups.py` | server | Backups of the collection, the scanned cards and the decks |
+| `backups.py` | server | Backups of the collection, the scanned cards and the decks; full backups of every database file at one moment |
+| `storage.py` | server | What every database file has in common: connection setup, named migrations, table rebuilds |
 | `settings.py` | server | Choices made in the web interface, in `data/settings.json` |
 | `cleanup.py`, `setup_database.py` | server | Old capture images (on startup and as a CLI); downloading the card database |
 | `station_client.py` | station | `Station`: connects to the server, runs a `CardScanner`, reports status and preview, executes the server's commands, uploads captures |
@@ -264,6 +265,11 @@ again), which is what the next paragraph is about.
   `capture_id` is one step (`capture_accept_lock`), so two uploads of it at once are one capture.
 - A capture whose result could not be applied stays on record and is tried at the next starts,
   three times in all (`PendingCaptures.fail`, `MAX_ATTEMPTS`); then it is settled as an error.
+- A sender's `capture_id` can be on record once (a unique index), whatever asks first.
+- The station deletes a picture only when the server's answer names the capture
+  (`station_client.upload_verdict`: 200 / 202 with `capture`); 400 / 413 from the server mean
+  it will never be taken (kept, not sent again); everything else - a wrong token, a proxy's
+  page - is tried again. It used to delete on any answer below 500.
 - Applied uids and outcomes are kept 30 days (`KEEP_DAYS`). `applied_captures` is not part of a
   backup and stays when cards move to the collection or a backup is restored.
 
@@ -271,8 +277,9 @@ Verified 2026-10-09 on an isolated copy of the server (copies of the databases, 
 one upload sent twice, another sent twice at the same moment, the process killed (`kill -9`),
 the first capture put back on the record as a crash would leave it, restart - 2 cards for 2
 captures, and both repeats answered from the record. **Not tested**: a kill at exactly the
-moment between the two commits (the state was built by hand), and the clients' side - the
-station and the Android app still delete their picture on any answer below 500.
+moment between the two commits (the state was built by hand); the station's new rule against
+a real server (its decisions are unit-tested); and the Android app, which still deletes its
+picture on any answer below 500 (its own repository - `ServerOutcome.parse` there).
 
 Measured 2026-10-08 (server in Docker, OCR on an RTX 4070 Ti SUPER, a laptop on Wi-Fi sending
 recorded captures): one station at a card every 2.5 s - 30 of 30 added, 29 by OCR in 0.34 s
@@ -921,7 +928,48 @@ The app's own columns (`Card Name`, `Set`) → `import_csv`; CSVs written before
 `Set Code` columns existed import without a link to their printing. Any other
 file, or one where no card is found, is refused before "replace" deletes anything.
 
-**Imports never leave a half-filled table.** The download fills a staging table (`cards_import`), committing every 5,000 rows so the inventory can still write, and swap
+**The database files, in common** (`storage.py`, since 2026-10-09). Every manager's connection
+comes from `storage.connect`: usable from any thread (each manager has its lock), rows by
+column name, WAL, `synchronous=NORMAL` (unchanged: with WAL a power cut can lose the last
+commits, not corrupt the file) and `foreign_keys=ON` - SQLite enforces foreign keys only on
+connections that ask. A change to an existing table is a **named migration**, recorded in the
+table `schema_migrations` of the file it changed (a table, not `PRAGMA user_version`: the card
+database file is shared by four managers). `storage.rebuild` does one: a backup of the file
+first (`data/backups/migrations/<file>_before_<name>_<time>.db`, opened and checked - or the
+migration does not start), then one transaction with every table copied into its new
+definition, ids and AUTOINCREMENT counters kept, `PRAGMA foreign_key_check`, and counts and
+totals compared before and after; anything else is rolled back. The older column additions
+(`ALTER TABLE ... ADD COLUMN` at startup, each checked against the columns there) stay as they
+are.
+
+**Constraints** (migrations `inventory_constraints_1`, in both inventory files, and
+`deck_constraints_1`): `inventory.quantity` is an integer above 0, `added_quantity` NULL or not
+negative; `inventory_captures` and `inventory_sources` belong to an entry (`REFERENCES
+inventory(id) ON DELETE CASCADE`), a station's `quantity` is above 0; `deck_cards` belong to a
+deck (cascade), `quantity` above 0, `board` one of commander / main / side. So an entry or a
+station's row is deleted, never kept at 0 (`_delete_entries`, `_take_copies`, `_set_source` in
+`inventory.py`) - and `_delete_entries` removes the captures itself first, because the cascade
+takes rows, not thumbnail files. There is no foreign key from an entry's `card_id` to `cards`:
+entries outlive card data updates and other games have other card tables. Restoring a backup
+made before the constraints leaves out rows that could not stand (`backups.RESTORABLE`). Run on
+a copy of the collection in use (1,910 entries, 3,982 captures, 857 deck rows): every row
+identical afterwards, counters kept, 0.3 s.
+
+**Measured, not guessed** (`scripts/benchmark_db.py`, on a copy, 2026-10-09, 112,765 cards,
+warm medians): a printing by set + number 0.02 ms and a card by exact name 0.02 ms (both by
+index); a name by substring 34 ms and the deck builder's search 41 ms (both read every card);
+the collection list 17 ms; one camera's totals among 5,000 scanned entries 4.9 ms; a camera's
+oldest review item among 2,000, 0.12 ms. Done with that: `idx_deck_cards_deck` removed - the
+UNIQUE index on (deck_id, card_name, board) answers the same question as fast (0.05 / 0.08 ms).
+Not done, on purpose: indexes on `inventory_sources(station, inventory_id)` (4.7 -> 3.9 ms at a
+size the table never has), `review_queue(game, station, id)` (0.12 -> 0.02 ms) and
+`decks(game, updated_at)` (0.16 ms with 10 decks) - nothing a person would notice; and FTS5
+with the trigram tokenizer for substring search, which answered in 0.05-0.14 ms (index built in
+0.33 s) but would be a second structure to rebuild with every card data update and another
+definition of "matches" beside the one identification relies on, for 34 ms nobody waits on.
+Worth doing when the card data is several times larger.
+
+**Imports never leave a half-filled table.** The download fills a staging table (`cards_import`) on a connection of its own (one refresh at a time), committing every 5,000 rows so the inventory can still write, and swap
 it in at the end in one transaction (`CardDatabase.replace_table`: `BEGIN IMMEDIATE`, drop,
 rename, indexes, the `card_data_info` row, commit - or all of it rolled back) - scanning keeps
 using the old data while an update runs. Before anything is touched the import is refused when
@@ -1069,7 +1117,24 @@ managers' locks. The interval and how many are kept are set in the drawer
 (`POST /api/backups/schedule`; `backup_every_hours` - 0 off, 1, 6, 12, 24, 168 - and
 `backup_keep`, 1-60, in `data/settings.json`; default every day, the last 7); older ones are
 deleted when a new one is made, not when the number is lowered. A failure is logged and does
-not stop the app. Backups made by hand are never deleted automatically. They are in
+not stop the app. Backups made by hand are never deleted automatically.
+
+**A full backup** (`POST /api/backups/full`, `backups.create_full`, used by
+`scripts/backup.sh` while the server runs) is everything at one moment: the three database
+files (SQLite's backup), hard links to the pictures their rows name (capture thumbnails, review
+images, captures waiting to be read) and the settings files, in
+`data/backups/full/<date_time>/` with a `manifest.json` (rows per table, pictures, the ones
+missing, `verified`). It is taken holding every manager's lock (in the order `take_from` uses)
+and `maintenance_barrier`, which a capture being settled and the clean-up of old pictures hold
+too - so a card on its way to the collection or a capture being added is in none of the
+snapshots or in all of them; the files are opened and checked after the locks are let go. The
+last 2 are kept. `scripts/backup.sh` then archives those snapshots with the rest of `data/`
+(without a running server it snapshots each file on its own, which is the same when nothing
+runs). Bringing one back is done by hand with the server stopped (INSTALL.md). Tested on
+temporary data (`FullBackup`: opened in another folder, an interrupted move in it is finished)
+and against an isolated copy of the server; **not tested**: restoring a whole server from one.
+
+The backups of the list above are in
 `data/backups/`, on the same disk as the data: against a lost disk, download a backup - the
 arrow beside it, `GET /api/backups/<id>/download`, `backups.archive`: a zip of its folder
 (`<id>/backup.db`, `<id>/captures/`), packed into a temporary file. **Upload a backup

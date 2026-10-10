@@ -265,6 +265,7 @@ class Station:
         while True:
             item = self.uploads.get()
             delay = 1.0
+            kept = False
             while True:
                 try:
                     files = {'image': (item['image'].name, item['image'].read_bytes(), 'image/jpeg')}
@@ -276,20 +277,47 @@ class Station:
                         # capture_id: this same capture sent again (no answer came) is still one card
                         data={'name': self.name, 'camera': '1', 'mode': item['mode'], 'wait': '0',
                               'capture_id': item['capture_id'], 'foil_is_image': '1' if item['foil_is_image'] else '0'})
-                    if response.status_code < 500:
-                        # The server has it - or refuses it for good (a wrong token, an unreadable
-                        # picture): sending it again would change nothing
-                        if response.status_code >= 400:
-                            logger.error(f"The server refused {item['image'].name}: {response.text[:200]}")
+                    verdict = upload_verdict(response)
+                    if verdict == 'accepted':
                         break
-                    logger.warning(f"Server error {response.status_code} for {item['image'].name} - trying again")
+                    if verdict == 'refused':
+                        # The server will never take this picture (unreadable, too large): it is
+                        # kept here, not sent again
+                        logger.error(f"The server refused {item['image'].name}: {response.text[:200]} - the picture is kept")
+                        kept = True
+                        break
+                    logger.warning(f"Unexpected answer {response.status_code} for {item['image'].name} - trying again in {delay:.0f} s")
                 except (requests.RequestException, OSError) as e:
                     logger.warning(f"Could not send {item['image'].name} ({type(e).__name__}) - trying again in {delay:.0f} s")
                 time.sleep(delay)
                 delay = min(delay * 2, 15.0)
-            for path in (item['image'], item['foil']):
-                if path:
-                    path.unlink(missing_ok=True)
+            if not kept:
+                for path in (item['image'], item['foil']):
+                    if path:
+                        path.unlink(missing_ok=True)
+
+
+def upload_verdict(response):
+    """
+    What the server's answer to an uploaded capture means for the picture here:
+      'accepted'  the server has the capture on record (its answer names the capture's number):
+                  only then is the picture deleted
+      'refused'   the server answered that it will never take it (400 unreadable, 413 too large)
+      'retry'     anything else - an error, a wrong token (401: it is tried again until the token
+                  is put right), a proxy's page, an answer that is not the server's
+    An answer below 500 used to count as "the server has it", whatever it said.
+    """
+    try:
+        answer = response.json()
+    except ValueError:
+        answer = None
+    if not isinstance(answer, dict):
+        return 'retry'
+    if response.status_code in (200, 202) and isinstance(answer.get('capture'), int):
+        return 'accepted'
+    if response.status_code in (400, 413) and answer.get('success') is False:
+        return 'refused'
+    return 'retry'
 
 
 def main():
