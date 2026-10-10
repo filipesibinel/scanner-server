@@ -342,6 +342,80 @@ a.btn {
     gap: 8px;
 }
 
+/* What narrows the list, each to be taken off; badges that filter when clicked */
+.filter-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px;
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.filter-chip span {
+    font-size: 14px;
+    line-height: 1;
+}
+
+.filter-chip:hover {
+    background: var(--accent);
+    color: #fff;
+}
+
+.inventory-badge[data-filter] {
+    cursor: pointer;
+}
+
+.inventory-badge[data-filter]:hover {
+    outline: 1px solid currentColor;
+}
+
+/* A change that waits to be sent: its rows, and the bar with Undo */
+.is-pending {
+    opacity: 0.35;
+    pointer-events: none;
+}
+
+.undo-bar {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    z-index: 190;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    max-width: calc(100vw - 32px);
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    box-shadow: var(--shadow);
+    font-size: 13px;
+    overflow: hidden;
+}
+
+.undo-time {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    height: 3px;
+    width: 100%;
+    background: var(--accent);
+    transform-origin: left;
+}
+
+@keyframes undoTime {
+    from { transform: scaleX(1); }
+    to { transform: scaleX(0); }
+}
+
 /* ---------------------------------------------------------------- Trades */
 
 .trade {

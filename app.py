@@ -1431,9 +1431,10 @@ def delete_backup(backup_id):
     return jsonify({'success': True, 'backups': backups.list_backups()})
 
 
-@app.route('/api/export_inventory/<fmt>')
+@app.route('/api/export_inventory/<fmt>', methods=['GET', 'POST'])
 def export_inventory(fmt):
-    """Download the active game's inventory in one of its export formats (Game.export_formats)"""
+    """Download the active game's inventory in one of its export formats (Game.export_formats).
+    POST (JSON: ids): only those entries - the ones ticked or shown on the page."""
     if not inventory:
         return jsonify({'error': 'Inventory not initialized'}), 500
     game = games.active()
@@ -1442,6 +1443,13 @@ def export_inventory(fmt):
         return jsonify({'error': f'Unknown export format: {fmt}'}), 404
     try:
         _label, prefix, writer = formats[fmt]
+        if request.method == 'POST':
+            ids = {int(row_id) for row_id in (request.get_json(silent=True) or {}).get('ids') or []}
+            text = io.StringIO(newline='')
+            writer([card for card in inventory_area().get_all_cards(game.id) if card['id'] in ids], text)
+            name = f"{prefix}_part_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            return Response(text.getvalue(), mimetype='text/csv',
+                            headers={'Content-Disposition': f'attachment; filename="{name}"'})
         export_path = inventory_area().export(game.id, writer, prefix)
         return send_file(str(export_path), mimetype='text/csv', as_attachment=True,
                          download_name=export_path.name)

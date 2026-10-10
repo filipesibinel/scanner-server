@@ -1229,16 +1229,45 @@ a term `field:value` (`collection.js`: `SEARCH_FIELDS`, `parseSearch`) looks in 
 `set:` is the whole set code when the collection has a set with that code (`set:HOB` does not
 find "Hobbiton"), otherwise part of the set's name; `name:` and `type:` are part of the text,
 `rarity:` its beginning, `tag:`, `loc:` / `location:`, `finish:` and `number:` the whole value
-(`loc:""`: no location). Quotes keep spaces together, a minus in front turns one term around
+(`loc:""`: no location), `qty:` the number of copies (`qty:>4`, `qty:<=2`, `qty:3` - the
+entries with spare copies), `trade:` part of the name of a trade that holds copies. Quotes
+keep spaces together, a minus in front turns one term around
 (`-set:HOB`), and a word with a colon that names no field stays ordinary text. **Not** turns
 the whole field around. The filters are kept in the browser (`localStorage`: `collectionFilters`,
 `saveFilters` / `restoreFilters`) and are there again on the next visit - all but the "Added"
 batch and **No use in my decks**; a set, tag or location that is gone from the collection is
-not filtered by, and **Clear filters** can only be pressed while something is filtered. The
+not filtered by, and **Clear filters** can only be pressed while something is filtered. What
+narrows the list is also shown as chips above it (`activeFilters`: "Rarity: rare ×"), each
+taken off with a click, and is written into the page's address (`FILTER_PARAMS`:
+`/collection?q=qty%3A%3E1&rarity=rare&colors=G`; `history.replaceState`, so no history entry
+per filter) - an address with filters, a bookmark, wins over the remembered ones. A click on a
+row's rarity, finish, location, tag or trade badge filters by it, a second click takes that off
+(`filterByBadge`). Hovering a row's name shows the card's picture large, as in the deck builder
+(`data-image`, `showPreview`; devices with a mouse). The
 list is shown in pages of 25 / 50 / 100 / 200 entries (100 until chosen, `collectionPageSize`;
 `showPage`): a changed filter or sort starts at the first page, a reload after an edit stays
 on the page. A tick with Shift held (`pick`) ticks or unticks every entry from the one ticked
-before to this one, in the order shown and also across pages. Selected entries get the bulk bar (`POST /api/inventory/bulk`). Rows also carry `decks`:
+before to this one, in the order shown and also across pages. **Export…** asks which cards
+when some are ticked or the list is filtered - everything, the ones shown, or the ones selected
+(`POST /api/export_inventory/<format>` with JSON `ids` answers with the file of those entries;
+the `GET` is everything, as before).
+
+**Undo.** A row's bin and every bulk action (delete, move, tag, condition) wait `UNDO_SECONDS`
+(6 s) before the server hears of them (`changeLater`): the rows are greyed, a bar at the bottom
+says what is about to happen and has **Undo** (also Ctrl+Z), which simply drops the change.
+When the time is over the change goes to `POST /api/inventory/bulk` (`sendPending`). It is
+never left behind: the page's `fetch` is wrapped so that any other write waits until the
+pending change has been sent, a second change sends the first (the calls are taken one after
+the other, `changesAsked`), and leaving the page sends it on the way out (`pagehide`; the
+request is `keepalive`, so it is also finished when the page is left while it is on its way). The single delete no longer asks first; the bulk
+delete still does. A change the server refuses (a card a trade holds) is reported when it is
+sent, not when it is clicked. Never tested: closing the browser during the six seconds on a
+phone.
+
+**Keys** (`inventoryKey`; Inventory tab, no dialog open, not while typing): `/` goes to the
+search field (Esc leaves it), Esc clears the selection, ← / → turn the page, Ctrl+A selects
+everything shown, Del deletes the selection (asks), Ctrl+Z undoes the waiting change.
+Selected entries get the bulk bar (`POST /api/inventory/bulk`). Rows also carry `decks`:
 the names of the decks that use the card (by name, `DeckManager.needed_by_name`; a Commander
 deck's considered cards don't count) - shown as a badge, and hidden by the **Not in a deck**
 tick. A deck lists names, not copies, so the location decides which copies are its own

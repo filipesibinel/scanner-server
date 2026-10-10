@@ -99,6 +99,11 @@ const PAGE_SIZES = [25, 50, 100, 200];
 const FILTER_FIELDS = ['filter-text', 'filter-type', 'filter-rarity', 'filter-set', 'filter-finish', 'filter-location',
                        'filter-tag', 'filter-price-min', 'filter-price-max'];
 const FILTER_TICKS = ['filter-text-not', 'filter-free'];
+// ... and their names in the page's address (?set=...&rarity=rare), which can be kept as a bookmark
+const FILTER_PARAMS = {'filter-text': 'q', 'filter-type': 'type', 'filter-rarity': 'rarity', 'filter-set': 'set',
+                       'filter-finish': 'finish', 'filter-location': 'loc', 'filter-tag': 'tag', 'filter-price-min': 'min',
+                       'filter-price-max': 'max', 'filter-text-not': 'not', 'filter-free': 'free'};
+const UNDO_SECONDS = 6;
 
 let inventory = [];
 let shown = [];             // after filters and sort
@@ -112,8 +117,18 @@ let suggested = null;       // {card name: [decks whose commander it is played w
 let inventoryView = recall('collectionView', 'list');
 
 function recallFilters() {
+    // The filters of the address when it names any (a bookmark), else the ones of the last visit
     let saved = {};
-    try { saved = JSON.parse(recall('collectionFilters', '{}')) || {}; } catch (e) { /* not ours */ }
+    const params = new URLSearchParams(window.location.search);
+    if ([...Object.values(FILTER_PARAMS), 'colors'].some(name => params.has(name))) {
+        [...FILTER_FIELDS, ...FILTER_TICKS].forEach(id => {
+            const value = params.get(FILTER_PARAMS[id]);
+            if (value) saved[id] = FILTER_TICKS.includes(id) ? true : value;
+        });
+        saved.colors = [...(params.get('colors') || '').toUpperCase()];
+    } else {
+        try { saved = JSON.parse(recall('collectionFilters', '{}')) || {}; } catch (e) { /* not ours */ }
+    }
     return {...saved, colors: Array.isArray(saved.colors) ? saved.colors.filter(color => COLORS.some(([key]) => key === color)) : []};
 }
 
@@ -122,6 +137,14 @@ function saveFilters() {
     FILTER_FIELDS.forEach(id => { if ($(id).value) state[id] = $(id).value; });
     FILTER_TICKS.forEach(id => { if ($(id).checked) state[id] = true; });
     remember('collectionFilters', JSON.stringify(state));
+    // The address says the same (the #settings part stays)
+    const params = new URLSearchParams();
+    [...FILTER_FIELDS, ...FILTER_TICKS].forEach(id => { if (state[id]) params.set(FILTER_PARAMS[id], state[id] === true ? '1' : state[id]); });
+    if (state.colors.length) params.set('colors', state.colors.join(''));
+    const query = params.toString();
+    try {
+        history.replaceState(null, '', window.location.pathname + (query ? '?' + query : '') + window.location.hash);
+    } catch (e) { /* the list works without it */ }
 }
 
 function restoreFilters() {
@@ -133,6 +156,7 @@ function restoreFilters() {
     });
     FILTER_TICKS.forEach(id => { $(id).checked = savedFilters[id] === true; });
     savedFilters = null;
+    saveFilters();  // what was taken, in the address too
 }
 
 function filtersChanged() {
@@ -282,6 +306,14 @@ const SEARCH_FIELDS = {
     loc: (card, value) => (card.location || '').toLowerCase() === value,
     finish: (card, value) => [card.finish, finishLabel(card.finish)].some(finish => (finish || '').toLowerCase() === value),
     number: (card, value) => String(card.number || '').toLowerCase() === value,
+    // qty:>4, qty:<=2, qty:3 - how many copies the entry has
+    qty: (card, value) => {
+        const [, sign, number] = /^(>=|<=|>|<|=)?(\d+)$/.exec(value) || [];
+        if (number === undefined) return false;
+        const copies = card.quantity, wanted = parseInt(number);
+        return sign === '>' ? copies > wanted : sign === '<' ? copies < wanted : sign === '>=' ? copies >= wanted
+            : sign === '<=' ? copies <= wanted : copies === wanted;
+    },
     // Set aside for a trade with this in its name; trade:"" = for any trade
     trade: (card, value) => (card.trades || []).some(trade => trade.name.toLowerCase().includes(value)),
 };
@@ -297,6 +329,53 @@ function parseSearch(text) {
         return ' ';
     });
     return {terms, phrase: phrase.replace(/\s+/g, ' ').trim()};
+}
+
+function activeFilters() {
+    // [{text, clear}] of what narrows the list now
+    const chips = [];
+    const chosen = (id, label) => {
+        if ($(id).value) chips.push({text: `${label}: ${$(id).selectedOptions[0].textContent}`, clear: () => { $(id).value = ''; }});
+    };
+    const text = $('filter-text').value.trim();
+    if (text) {
+        chips.push({text: `${$('filter-text-not').checked ? 'Not' : 'Search'}: ${text}`,
+                    clear: () => { $('filter-text').value = ''; $('filter-text-not').checked = false; }});
+    }
+    if (filterColors.size) {
+        chips.push({text: `Colors: ${[...filterColors].join(' ')}`, clear: () => { filterColors.clear(); fillFilterOptions(); }});
+    }
+    chosen('filter-type', 'Type');
+    chosen('filter-rarity', 'Rarity');
+    chosen('filter-set', 'Set');
+    chosen('filter-finish', 'Finish');
+    chosen('filter-location', 'Location');
+    chosen('filter-tag', 'Tag');
+    if ($('filter-added').value) chips.push({text: $('filter-added').selectedOptions[0].textContent, clear: () => { $('filter-added').value = ''; }});
+    if ($('filter-free').checked) chips.push({text: 'Not in a deck', clear: () => { $('filter-free').checked = false; }});
+    if ($('filter-spare').checked) chips.push({text: 'No use in my decks', clear: () => { $('filter-spare').checked = false; }});
+    const min = $('filter-price-min').value, max = $('filter-price-max').value;
+    if (min || max) {
+        chips.push({text: 'Price: ' + (min && max ? `$${min} – $${max}` : min ? `from $${min}` : `up to $${max}`),
+                    clear: () => { $('filter-price-min').value = ''; $('filter-price-max').value = ''; }});
+    }
+    return chips;
+}
+
+function filterByBadge(filter, value) {
+    // A click on a row's badge shows only the cards with it; a second click takes that off again
+    if (filter === 'trade') {
+        const term = `trade:"${value.toLowerCase()}"`, field = $('filter-text');
+        field.value = field.value.toLowerCase().includes(term)
+            ? field.value.replace(new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'), '').replace(/\s+/g, ' ').trim()
+            : `${field.value.trim()} ${term}`.trim();
+    } else {
+        const select = $(filter);
+        select.value = select.value === value ? '' : value;
+        if (select.selectedIndex === -1) select.value = '';
+    }
+    filtersChanged();
+    window.scrollTo(0, 0);
 }
 
 function applyFilters() {
@@ -335,9 +414,12 @@ function applyFilters() {
         return true;
     });
     $('batch-remove').hidden = !added;
-    // Filters come back on the next visit: show that the list is not everything
-    $('filter-clear').disabled = !(phrase || terms.length || type || rarity || set || finish || location || tag || added
-                                   || free || $('filter-spare').checked || !isNaN(min) || !isNaN(max) || filterColors.size);
+    // Filters come back on the next visit: show what narrows the list, each to be taken off
+    const chips = activeFilters();
+    $('filter-chips').innerHTML = chips.map((chip, index) =>
+        `<button class="filter-chip" data-chip="${index}" title="Take this filter off">${escapeHtml(chip.text)} <span>×</span></button>`).join('');
+    $('filter-chips').hidden = !chips.length;
+    $('filter-clear').disabled = !chips.length;
     const sort = recall('collectionSort', 'added');
     $('inventory-sort').value = sort in INVENTORY_SORTS ? sort : 'added';
     shown = INVENTORY_SORTS[sort] ? [...rows].sort(INVENTORY_SORTS[sort]) : rows;
@@ -349,21 +431,27 @@ function applyFilters() {
 
 function badgesHtml(card) {
     const rarity = (card.rarity || '').toLowerCase();
+    const only = (filter, value) => `data-filter="${filter}" data-value="${escapeHtml(value)}"`;  // filterByBadge
     return `
-        ${rarity ? `<span class="inventory-badge ${escapeHtml(rarity)}">${escapeHtml(rarity.toUpperCase())}</span>` : ''}
-        ${card.finish !== defaultFinish() ? `<span class="inventory-badge ${escapeHtml(card.finish)}">${escapeHtml(finishLabel(card.finish).toUpperCase())}</span>` : ''}
-        ${card.location ? `<span class="inventory-badge location" title="Location">${escapeHtml(card.location)}</span>` : ''}
-        ${card.tags.map(tag => `<span class="inventory-badge tag" title="Tag">${escapeHtml(tag)}</span>`).join('')}
-        ${(card.trades || []).map(trade => `<span class="inventory-badge trade" title="Set aside for the trade &quot;${escapeHtml(trade.name)}&quot; - see the Trades tab">Trade: ${
+        ${rarity ? `<span class="inventory-badge ${escapeHtml(rarity)}" ${only('filter-rarity', card.rarity)} title="Rarity - click to show only these">${escapeHtml(rarity.toUpperCase())}</span>` : ''}
+        ${card.finish !== defaultFinish() ? `<span class="inventory-badge ${escapeHtml(card.finish)}" ${only('filter-finish', card.finish)} title="Finish - click to show only these">${escapeHtml(finishLabel(card.finish).toUpperCase())}</span>` : ''}
+        ${card.location ? `<span class="inventory-badge location" ${only('filter-location', card.location)} title="Location - click to show only these">${escapeHtml(card.location)}</span>` : ''}
+        ${card.tags.map(tag => `<span class="inventory-badge tag" ${only('filter-tag', tag)} title="Tag - click to show only these">${escapeHtml(tag)}</span>`).join('')}
+        ${(card.trades || []).map(trade => `<span class="inventory-badge trade" ${only('trade', trade.name)} title="Set aside for the trade &quot;${escapeHtml(trade.name)}&quot; (Trades tab) - click to show only these">Trade: ${
             escapeHtml(trade.name)}${trade.quantity < card.quantity ? ` ${trade.quantity}×` : ''}</span>`).join('')}
         ${card.decks.length ? `<span class="inventory-badge deck" title="Used in: ${escapeHtml(card.decks.join(', '))}">${
             escapeHtml(card.decks.length === 1 ? card.decks[0] : plural(card.decks.length, 'deck'))}</span>` : ''}`;
 }
 
+function waiting(card) {
+    // Part of a change that is not sent yet (changeLater)
+    return !!pendingChange && pendingChange.ids.has(card.id);
+}
+
 function gridCardHtml(card) {
     const image = (card.details && card.details.image_uri) || (card.captures[0] && card.captures[0].url);
     return `
-        <div class="grid-card ${selected.has(card.id) ? 'is-selected' : ''}" data-id="${card.id}">
+        <div class="grid-card ${selected.has(card.id) ? 'is-selected' : ''} ${waiting(card) ? 'is-pending' : ''}" data-id="${card.id}">
             ${image ? `<img src="${escapeHtml(image)}" alt="${escapeHtml(card.name)}" loading="lazy">`
                     : `<div class="no-image">${escapeHtml(card.name)}</div>`}
             <input type="checkbox" class="row-check" ${selected.has(card.id) ? 'checked' : ''} aria-label="Select">
@@ -377,13 +465,13 @@ function gridCardHtml(card) {
 function listRowHtml(card) {
     const image = (card.captures[0] && card.captures[0].url) || (card.details && card.details.image_uri);
     return `
-        <div class="inventory-card ${selected.has(card.id) ? 'is-selected' : ''}" data-id="${card.id}">
+        <div class="inventory-card ${selected.has(card.id) ? 'is-selected' : ''} ${waiting(card) ? 'is-pending' : ''}" data-id="${card.id}">
             <input type="checkbox" class="row-check" ${selected.has(card.id) ? 'checked' : ''} aria-label="Select">
             ${image ? `<button class="inventory-thumb" title="${card.captures.length ? plural(card.captures.length, 'capture') : 'Card image'}">
                            <img src="${escapeHtml(image)}" alt="" loading="lazy"></button>`
                     : '<div class="inventory-thumb empty" title="No image"></div>'}
             <div class="inventory-card-info">
-                <div class="inventory-card-name">
+                <div class="inventory-card-name" data-image="${escapeHtml((card.details && card.details.image_uri) || '')}">
                     ${card.quantity > 1 ? `<span class="inventory-qty">${card.quantity}×</span> ` : ''}${escapeHtml(card.name)}
                     ${manaHtml(card.mana_cost)}
                 </div>
@@ -473,6 +561,37 @@ function pick(id, on, range) {
     renderInventory();
 }
 
+function inventoryKey(event) {
+    // Keys of the Inventory tab, when no dialog is open and nothing is being typed:
+    // / search, Esc clear the selection, arrows previous / next page, Ctrl+A select all shown,
+    // Del delete the selection, Ctrl+Z undo
+    if (currentTab !== 'inventory' || document.querySelector('.modal.show, .drawer.show')) return;
+    const typing = event.target.matches('input, textarea, select') || event.target.isContentEditable;
+    const command = event.ctrlKey || event.metaKey;
+    if (event.key === 'Escape' && event.target === $('filter-text')) return $('filter-text').blur();
+    if (typing || event.altKey) return;  // Ctrl+Z in a text field is the field's own
+    if (command && event.key.toLowerCase() === 'z' && pendingChange) {
+        event.preventDefault();
+        undoPending();
+    } else if (event.key === '/' && !command) {
+        event.preventDefault();
+        $('filter-text').focus();
+        $('filter-text').select();
+    } else if (event.key === 'Escape' && selected.size) {
+        selected.clear();
+        renderInventory();
+    } else if (command && event.key.toLowerCase() === 'a' && shown.length) {
+        event.preventDefault();
+        shown.forEach(card => selected.add(card.id));
+        renderInventory();
+    } else if (event.key === 'Delete' && selected.size) {
+        bulkAction('delete');
+    } else if ((event.key === 'ArrowLeft' || event.key === 'ArrowRight') && !command && !event.shiftKey) {
+        const next = page + (event.key === 'ArrowRight' ? 1 : -1);
+        if (next >= 0 && next < Math.ceil(shown.length / pageSize)) showPage(next);
+    }
+}
+
 function showPage(number) {
     page = number;
     renderInventory();
@@ -520,7 +639,7 @@ async function bulkAction(action) {
     let value = '';
     if (action === 'delete') {
         const ok = await confirmDialog({title: `Delete ${entries}?`, confirmText: 'Delete', danger: true,
-            message: "The selected cards are removed from your inventory. This can't be undone."});
+            message: `The selected cards are removed from your inventory. You have ${UNDO_SECONDS} seconds to undo it.`});
         if (!ok) return;
     } else if (action === 'location') {
         value = await valueDialog({title: `Move ${entries}`, label: 'Location (empty: none)', options: knownLocations()});
@@ -537,13 +656,77 @@ async function bulkAction(action) {
     } else if (action === 'trade') {
         return setAsideForTrade();
     }
-    const data = await api('/api/inventory/bulk', {method: 'POST', body: {ids, action, value}});
-    if (!data) return;
-    notify(`${entriesText(data.changed)} changed`, 'success');
-    // Done with these cards: left selected, they went along with the next "Select all" and its
-    // move (59 cards put in one box ended up in another, 2026-10-06)
-    selected.clear();
-    loadInventory();
+    const what = {delete: `Deleting ${entries}`, location: `Moving ${entries} to ${value || 'no location'}`,
+                  add_tag: `Tagging ${entries} "${value}"`, remove_tag: `Taking the tag "${value}" off ${entries}`,
+                  condition: `Setting ${entries} to ${value}`}[action];
+    changeLater(ids, what, {ids, action, value});
+}
+
+// -- Undo: a change waits a few seconds before it is sent ---------------------
+
+let pendingChange = null;            // {ids: Set of entry ids, body: for /api/inventory/bulk, timer}
+let pendingSent = Promise.resolve(); // the change being sent
+let changesAsked = Promise.resolve(); // changeLater, one call after the other
+const plainFetch = window.fetch.bind(window);
+// Whatever else writes (an edit, a trade, a backup) goes after the change that waits, never
+// around it: it is sent first
+window.fetch = async (input, options) => {
+    if (((options && options.method) || 'GET').toUpperCase() !== 'GET') await sendPending();
+    return plainFetch(input, options);
+};
+
+function changeLater(ids, text, body) {
+    // A delete or a bulk change: its rows are greyed and the server hears of it when the time
+    // to undo is over - or at once when something else is changed or the page is left.
+    // One call at a time: two asked for while an earlier change was on its way both waited
+    // for it, and the second then took the first one's place - which was never sent
+    changesAsked = changesAsked.then(async () => {
+        await sendPending();
+        pendingChange = {ids: new Set(ids), body, timer: setTimeout(sendPending, UNDO_SECONDS * 1000)};
+        $('undo-text').textContent = text;
+        $('undo-bar').hidden = false;
+        $('undo-time').style.animation = 'none';
+        $('undo-time').offsetWidth;  // the bar starts to run out again
+        $('undo-time').style.animation = `undoTime ${UNDO_SECONDS}s linear forwards`;
+        // Done with these cards: left selected, they went along with the next "Select all" and
+        // its move (59 cards put in one box ended up in another, 2026-10-06)
+        selected.clear();
+        renderInventory();
+    });
+    return changesAsked;
+}
+
+function sendPending() {
+    const change = pendingChange;
+    if (!change) return pendingSent;
+    pendingChange = null;
+    clearTimeout(change.timer);
+    $('undo-bar').hidden = true;
+    pendingSent = (async () => {
+        try {
+            // keepalive: the request is finished also when the page is left while it is on
+            // its way (browsers take up to 64 KB that way - some 8,000 entries)
+            const body = JSON.stringify(change.body);
+            const response = await plainFetch('/api/inventory/bulk', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                                                      body, keepalive: body.length < 60000});
+            const data = await response.json();
+            if (data.success === false) notify(data.error || 'Request failed', 'error');
+            else notify(`${entriesText(data.changed)} ${change.body.action === 'delete' ? 'deleted' : 'changed'}`, 'success');
+        } catch (error) {
+            notify(`Request failed: ${error.message}`, 'error');
+        }
+        await loadInventory();
+    })();
+    return pendingSent;
+}
+
+function undoPending() {
+    if (!pendingChange) return;
+    clearTimeout(pendingChange.timer);
+    pendingChange = null;
+    $('undo-bar').hidden = true;
+    notify('Undone - nothing was changed', 'info');
+    renderInventory();
 }
 
 async function removeBatch() {
@@ -594,16 +777,40 @@ function importFormats() {
     return [...gameInfo.imports, 'Card Scanner'].join(' or ');
 }
 
-function exportInventory() {
+async function exportInventory() {
     // The server sends the file as a download; the menu goes back to "Export…"
     const select = $('export-select');
     const format = select.value;
     if (!format) return;
     const label = select.selectedOptions[0].textContent;
     select.value = '';
+    // With cards ticked or the list filtered: which of them
+    let part = 'all';
+    if (selected.size || shown.length !== inventory.length) {
+        part = await choiceDialog({title: `Export for ${label}`, message: 'Which cards go into the file?', choices: [
+            {label: `Everything (${entriesText(inventory.length)})`, value: 'all'},
+            ...(shown.length !== inventory.length ? [{label: `The ${shown.length} shown`, value: 'shown', style: selected.size ? undefined : 'primary'}] : []),
+            ...(selected.size ? [{label: `The ${selected.size} selected`, value: 'selected', style: 'primary'}] : [])]});
+        if (!part) return;
+    }
     const link = document.createElement('a');
-    link.href = `/api/export_inventory/${encodeURIComponent(format)}`;
-    link.download = '';
+    if (part === 'all') {
+        link.href = `/api/export_inventory/${encodeURIComponent(format)}`;
+        link.download = '';
+    } else {
+        const ids = part === 'selected' ? [...selected] : shown.map(card => card.id);
+        let response;
+        try {
+            response = await plainFetch(`/api/export_inventory/${encodeURIComponent(format)}`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ids})});
+        } catch (error) {
+            return notify(`Export failed: ${error.message}`, 'error');
+        }
+        if (!response.ok) return notify('Export failed', 'error');
+        link.href = URL.createObjectURL(await response.blob());
+        link.download = (/filename="([^"]+)"/.exec(response.headers.get('Content-Disposition') || '') || [])[1] || 'export.csv';
+        setTimeout(() => URL.revokeObjectURL(link.href), 60000);
+    }
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -1729,11 +1936,14 @@ function bindInventoryEvents() {
 
     // Inventory rows
     $('inventory-list').addEventListener('click', event => {
+        const badge = event.target.closest('.inventory-badge[data-filter]');
+        if (badge) return filterByBadge(badge.dataset.filter, badge.dataset.value);
         const row = event.target.closest('[data-id]');
         const card = rowCard(row);
         if (!card) return;
         if (event.target.closest('.btn-edit')) return editCard(card, knownLocations(), () => shown);
-        if (event.target.closest('.btn-delete')) return deleteCard(card.id, card.name);
+        // No question first: it can be undone
+        if (event.target.closest('.btn-delete')) return changeLater([card.id], `Deleting ${card.name}`, {ids: [card.id], action: 'delete', value: ''});
         if (event.target.closest('.inventory-thumb') && card.captures.length) return openCaptures(card);
         if (event.target.classList.contains('row-check')) return pick(card.id, event.target.checked, event.shiftKey);
         // Grid: a click on the card selects it, a double click edits it
@@ -1751,6 +1961,16 @@ function bindInventoryEvents() {
             editCard(card, knownLocations(), () => shown);
         }
     });
+    $('filter-chips').addEventListener('click', event => {
+        const chip = event.target.closest('[data-chip]');
+        if (!chip) return;
+        activeFilters()[parseInt(chip.dataset.chip)].clear();
+        filtersChanged();
+    });
+    $('undo-button').addEventListener('click', undoPending);
+    // Leaving the page is not an undo: what waits is sent on the way out
+    window.addEventListener('pagehide', () => { sendPending(); });
+    document.addEventListener('keydown', inventoryKey);
     $('bulk-bar').addEventListener('click', event => {
         const button = event.target.closest('[data-bulk]');
         if (button) bulkAction(button.dataset.bulk);

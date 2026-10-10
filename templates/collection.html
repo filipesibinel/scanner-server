@@ -7,7 +7,7 @@
     <title>Collection - Card Scanner</title>
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=43">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/collection.css') }}?v=18">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/collection.css') }}?v=19">
 </head>
 <body>
     {% include '_icons.html' %}
@@ -24,7 +24,7 @@
             </div>
             <div class="panel filter-panel">
                 <div class="filter-row">
-                    <input type="search" id="filter-text" class="text-input filter-text" placeholder="Search, or set:HOB" title='Looks in name, set, type, rarity, location and tags. To look in one place only: set:HOB (the set code, whole), name:ring, type:elf, rarity:rare, tag:trade, loc:"Binder 2", finish:foil, number:14, trade:jo (set aside for that trade). A minus in front leaves those out: -set:HOB'>
+                    <input type="search" id="filter-text" class="text-input filter-text" placeholder="Search, or set:HOB" title='Looks in name, set, type, rarity, location and tags. To look in one place only: set:HOB (the set code, whole), name:ring, type:elf, rarity:rare, tag:trade, loc:"Binder 2", finish:foil, number:14, qty:>4 (more than four copies), trade:jo (set aside for that trade). A minus in front leaves those out: -set:HOB'>
                     <label class="chip-toggle" title="Turn the search around: show the cards that do NOT match what is typed (type set:HOB to see everything that is not from that set)"><input type="checkbox" id="filter-text-not"><span>Not</span></label>
                     <div class="color-chips" id="filter-colors" title="Color identity"></div>
                     <select id="filter-type" class="select" title="Type"></select>
@@ -43,6 +43,7 @@
                     <button class="btn btn-small btn-danger" id="batch-remove" hidden title="Take these cards back out of the collection">Remove this batch</button>
                     <button class="btn btn-small btn-ghost" id="filter-clear">Clear filters</button>
                 </div>
+                <div class="filter-row filter-chips" id="filter-chips" hidden></div>
                 <div class="filter-row">
                     <label class="chip-toggle" id="select-all-label" title="Select every card the filters show, to move, tag or delete them together. For a few in a row: tick the first, then hold Shift and tick the last"><input type="checkbox" id="select-all"><span>Select all</span></label>
                     <span class="summary" id="inventory-summary"></span>
@@ -64,7 +65,7 @@
                         <button data-view="list" class="is-active" title="List"><svg class="icon"><use href="#i-list"/></svg></button>
                         <button data-view="grid" title="Card images"><svg class="icon"><use href="#i-grid"/></svg></button>
                     </div>
-                    <select id="export-select" class="select" title="Download your collection as a file for another site or app"></select>
+                    <select id="export-select" class="select" title="Download your collection as a file for another site or app - with cards ticked or the list filtered, it asks which of them"></select>
                     <button class="btn btn-small" id="import-button" onclick="document.getElementById('import-file-input').click()">Import</button>
                     <input type="file" id="import-file-input" accept=".csv" style="display: none;">
                 </div>
@@ -258,6 +259,13 @@
             </div>
         </section>
 
+        <!-- A delete or a bulk change waits here for a few seconds (collection.js: changeLater) -->
+        <div class="undo-bar" id="undo-bar" hidden>
+            <span id="undo-text"></span>
+            <button class="btn btn-small" id="undo-button" title="Ctrl+Z">Undo</button>
+            <span class="undo-time" id="undo-time"></span>
+        </div>
+
         <!-- ================= Trades ================= -->
         <section id="tab-trades" class="tab-panel" hidden>
             <div class="panel">
@@ -431,6 +439,6 @@
     {% include '_dialogs.html' %}
 
     <script src="{{ url_for('static', filename='js/common.js') }}?v=17"></script>
-    <script src="{{ url_for('static', filename='js/collection.js') }}?v=33"></script>
+    <script src="{{ url_for('static', filename='js/collection.js') }}?v=34"></script>
 </body>
 </html>
