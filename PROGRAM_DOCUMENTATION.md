@@ -1243,8 +1243,10 @@ taken off with a click, and is written into the page's address (`FILTER_PARAMS`:
 `/collection?q=qty%3A%3E1&rarity=rare&colors=G`; `history.replaceState`, so no history entry
 per filter) - an address with filters, a bookmark, wins over the remembered ones. A click on a
 row's rarity, finish, location, tag or trade badge filters by it, a second click takes that off
-(`filterByBadge`). Hovering a row's name shows the card's picture large, as in the deck builder
-(`data-image`, `showPreview`; devices with a mouse). The
+(`filterByBadge`). Hovering a row - anywhere in it - shows the card's picture large, beside the pointer and
+following it (`data-image` on the row, `showPreview`, `placePreview`; devices with a mouse;
+the deck builder's narrow rows show it beside the row). The box appears at once, card-shaped,
+and the picture when it has loaded; the previous card's picture is dropped first. The
 list is shown in pages of 25 / 50 / 100 / 200 entries (100 until chosen, `collectionPageSize`;
 `showPage`): a changed filter or sort starts at the first page, a reload after an edit stays
 on the page. A tick with Shift held (`pick`) ticks or unticks every entry from the one ticked

@@ -1007,6 +1007,9 @@ details.trade .trade-row {
     position: fixed;
     z-index: 200;
     width: 240px;
+    /* Card-shaped before the picture has loaded, so something shows at once */
+    aspect-ratio: 63 / 88;
+    background: var(--surface-2);
     border-radius: 12px;
     box-shadow: var(--shadow);
     pointer-events: none;

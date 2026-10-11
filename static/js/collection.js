@@ -465,13 +465,14 @@ function gridCardHtml(card) {
 function listRowHtml(card) {
     const image = (card.captures[0] && card.captures[0].url) || (card.details && card.details.image_uri);
     return `
-        <div class="inventory-card ${selected.has(card.id) ? 'is-selected' : ''} ${waiting(card) ? 'is-pending' : ''}" data-id="${card.id}">
+        <div class="inventory-card ${selected.has(card.id) ? 'is-selected' : ''} ${waiting(card) ? 'is-pending' : ''}" data-id="${card.id}"
+             data-image="${escapeHtml((card.details && card.details.image_uri) || '')}">
             <input type="checkbox" class="row-check" ${selected.has(card.id) ? 'checked' : ''} aria-label="Select">
             ${image ? `<button class="inventory-thumb" title="${card.captures.length ? plural(card.captures.length, 'capture') : 'Card image'}">
                            <img src="${escapeHtml(image)}" alt="" loading="lazy"></button>`
                     : '<div class="inventory-thumb empty" title="No image"></div>'}
             <div class="inventory-card-info">
-                <div class="inventory-card-name" data-image="${escapeHtml((card.details && card.details.image_uri) || '')}">
+                <div class="inventory-card-name">
                     ${card.quantity > 1 ? `<span class="inventory-qty">${card.quantity}×</span> ` : ''}${escapeHtml(card.name)}
                     ${manaHtml(card.mana_cost)}
                 </div>
@@ -1598,20 +1599,45 @@ async function loadPopular() {
 
 // -- Card image beside the hovered row -----------------------------------------
 
-function showPreview(row) {
+let previewRow = null;   // the row whose card is shown large
+
+function showPreview(row, event) {
     const preview = $('card-preview');
     const image = row && row.dataset.image;
     if (!image) {
         preview.hidden = true;
+        previewRow = null;
         return;
     }
-    preview.src = image;
+    if (preview.dataset.image !== image) {
+        // Without its old picture: a browser keeps showing that until the new one has loaded
+        // (the box itself is there at once, card-shaped)
+        preview.removeAttribute('src');
+        preview.src = image;
+        preview.dataset.image = image;
+    }
     preview.hidden = false;
-    const rect = row.getBoundingClientRect();
+    previewRow = row;
+    placePreview(event);
+}
+
+function placePreview(event) {
+    if (!previewRow) return;
+    const preview = $('card-preview');
     const height = 240 * 88 / 63;
-    const left = rect.right + 250 < window.innerWidth ? rect.right + 8 : rect.left - 248;
+    let left, top;
+    if (previewRow.classList.contains('inventory-card') && event) {
+        // An inventory row is as wide as the page: beside the pointer, wherever in the row it
+        // is, and never over what it points at
+        left = event.clientX + 24 + 240 < window.innerWidth ? event.clientX + 24 : event.clientX - 264;
+        top = event.clientY - height / 2;
+    } else {
+        const rect = previewRow.getBoundingClientRect();
+        left = rect.right + 250 < window.innerWidth ? rect.right + 8 : rect.left - 248;
+        top = rect.top - 40;
+    }
     preview.style.left = `${Math.max(8, left)}px`;
-    preview.style.top = `${Math.max(8, Math.min(rect.top - 40, window.innerHeight - height - 8))}px`;
+    preview.style.top = `${Math.max(8, Math.min(top, window.innerHeight - height - 8))}px`;
 }
 
 // ============================================================================
@@ -2167,7 +2193,10 @@ function bindEvents() {
 
     // Card image preview (devices with a mouse)
     if (window.matchMedia('(hover: hover)').matches) {
-        document.addEventListener('mouseover', event => showPreview(event.target.closest('[data-image]')));
+        document.addEventListener('mouseover', event => showPreview(event.target.closest('[data-image]'), event));
+        document.addEventListener('mousemove', event => {
+            if (previewRow && previewRow.classList.contains('inventory-card')) placePreview(event);
+        });
     }
 
     // Settings drawer (backups); /collection#settings opens it (the scanner's settings link here)
