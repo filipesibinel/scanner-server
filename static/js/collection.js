@@ -463,10 +463,12 @@ function gridCardHtml(card) {
 }
 
 function listRowHtml(card) {
-    const image = (card.captures[0] && card.captures[0].url) || (card.details && card.details.image_uri);
+    // On the left what was captured (a click opens the captures); by the buttons the card's
+    // downloaded picture, small - the pointer on it shows it large (showPreview)
+    const picture = (card.details && card.details.image_uri) || '';
+    const image = (card.captures[0] && card.captures[0].url) || picture;
     return `
-        <div class="inventory-card ${selected.has(card.id) ? 'is-selected' : ''} ${waiting(card) ? 'is-pending' : ''}" data-id="${card.id}"
-             data-image="${escapeHtml((card.details && card.details.image_uri) || '')}">
+        <div class="inventory-card ${selected.has(card.id) ? 'is-selected' : ''} ${waiting(card) ? 'is-pending' : ''}" data-id="${card.id}">
             <input type="checkbox" class="row-check" ${selected.has(card.id) ? 'checked' : ''} aria-label="Select">
             ${image ? `<button class="inventory-thumb" title="${card.captures.length ? plural(card.captures.length, 'capture') : 'Card image'}">
                            <img src="${escapeHtml(image)}" alt="" loading="lazy"></button>`
@@ -488,6 +490,8 @@ function listRowHtml(card) {
                 <div class="inventory-timestamp" title="Scanned ${escapeHtml(card.timestamp)}">Added ${card.added_quantity ? '' : 'before '}${escapeHtml(card.added_at.slice(0, 16))}${card.added_quantity && card.added_quantity < card.quantity ? ` (+${card.added_quantity})` : ''}</div>
             </div>
             <div class="inventory-card-actions">
+                ${picture ? `<span class="card-peek" data-image="${escapeHtml(picture)}" title="The card's picture - rest the pointer here to see it large">
+                                 <img src="${escapeHtml(picture.replace('/normal/', '/small/'))}" alt="" loading="lazy"></span>` : ''}
                 <button class="btn-trade" title="Set aside for a trade: it stays in your collection until you confirm the trade"><svg class="icon"><use href="#i-swap"/></svg></button>
                 <button class="btn-edit" title="Edit"><svg class="icon"><use href="#i-edit"/></svg></button>
                 <button class="btn-delete" title="Delete"><svg class="icon"><use href="#i-trash"/></svg></button>
@@ -1601,7 +1605,7 @@ async function loadPopular() {
 
 let previewRow = null;   // the row whose card is shown large
 
-function showPreview(row, event) {
+function showPreview(row) {
     const preview = $('card-preview');
     const image = row && row.dataset.image;
     if (!image) {
@@ -1618,26 +1622,19 @@ function showPreview(row, event) {
     }
     preview.hidden = false;
     previewRow = row;
-    placePreview(event);
+    placePreview();
 }
 
-function placePreview(event) {
+function placePreview() {
+    // Beside what the pointer is on (a deck row, the small picture of an inventory row), on
+    // the side that has room
     if (!previewRow) return;
     const preview = $('card-preview');
     const height = 240 * 88 / 63;
-    let left, top;
-    if (previewRow.classList.contains('inventory-card') && event) {
-        // An inventory row is as wide as the page: beside the pointer, wherever in the row it
-        // is, and never over what it points at
-        left = event.clientX + 24 + 240 < window.innerWidth ? event.clientX + 24 : event.clientX - 264;
-        top = event.clientY - height / 2;
-    } else {
-        const rect = previewRow.getBoundingClientRect();
-        left = rect.right + 250 < window.innerWidth ? rect.right + 8 : rect.left - 248;
-        top = rect.top - 40;
-    }
+    const rect = previewRow.getBoundingClientRect();
+    const left = rect.right + 250 < window.innerWidth ? rect.right + 8 : rect.left - 248;
     preview.style.left = `${Math.max(8, left)}px`;
-    preview.style.top = `${Math.max(8, Math.min(top, window.innerHeight - height - 8))}px`;
+    preview.style.top = `${Math.max(8, Math.min(rect.top - 40, window.innerHeight - height - 8))}px`;
 }
 
 // ============================================================================
@@ -2193,10 +2190,7 @@ function bindEvents() {
 
     // Card image preview (devices with a mouse)
     if (window.matchMedia('(hover: hover)').matches) {
-        document.addEventListener('mouseover', event => showPreview(event.target.closest('[data-image]'), event));
-        document.addEventListener('mousemove', event => {
-            if (previewRow && previewRow.classList.contains('inventory-card')) placePreview(event);
-        });
+        document.addEventListener('mouseover', event => showPreview(event.target.closest('[data-image]')));
     }
 
     // Settings drawer (backups); /collection#settings opens it (the scanner's settings link here)

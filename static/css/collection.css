@@ -216,6 +216,36 @@ a.btn {
     grid-template-columns: 20px 72px 1fr auto auto;
 }
 
+/* The card's downloaded picture, small, by the row's buttons: the place to rest the pointer
+   to see it large. Not where there is no pointer to rest, or no room */
+.card-peek {
+    width: 40px;
+    height: 56px;
+    margin-right: 4px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    background: var(--surface-2);
+    cursor: zoom-in;
+}
+
+.card-peek img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.card-peek:hover {
+    border-color: var(--accent);
+}
+
+@media (hover: none) {
+    .card-peek {
+        display: none;
+    }
+}
+
 /* Set aside for a trade: beside the pencil and the bin, and like them */
 .btn-trade {
     display: grid;
@@ -1078,6 +1108,10 @@ details.trade .trade-row {
     .collection-list .inventory-card-actions {
         flex-direction: column;
         gap: 4px;
+    }
+
+    .card-peek {
+        display: none;
     }
 
     /* Narrow screens keep the small photo: the name needs the room */

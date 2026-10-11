@@ -231,7 +231,7 @@ cards and to build decks. It works on a phone too.
   finds the cards you have more than four of. Click a badge on a row (rarity, location, tag...)
   to see only those cards; the active filters are listed above the cards, each with an × to
   take it off, and are part of the page's address, so a filtered view can be bookmarked. Hover
-  anywhere in a card's row to see its picture large. A delete or a change to several cards waits six
+  the small card picture by a row's buttons to see it large. A delete or a change to several cards waits six
   seconds with an **Undo** button (Ctrl+Z) before it happens. **Export** asks whether you want
   everything, the cards shown or the cards ticked. Keys: `/` search, ← → pages, Ctrl+A select
   all shown, Del delete the selection, Esc clear it. Tick **Not in a deck** to see only
