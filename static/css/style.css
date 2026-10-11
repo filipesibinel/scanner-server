@@ -1934,6 +1934,19 @@ input[type="radio"] {
     justify-content: flex-end;
 }
 
+/* The box is as wide as its row of buttons needs (three choices with long labels left the
+   480 px one), never narrower than before; the text wraps inside that and does not widen it */
+#dialog-modal .modal-content {
+    width: fit-content;
+    min-width: min(480px, 100%);
+    max-width: min(900px, 100%);
+}
+
+#dialog-modal .dialog-message {
+    width: 0;
+    min-width: 100%;
+}
+
 /* Notifications (bottom right) */
 .toast-container {
     position: fixed;

@@ -788,10 +788,11 @@ async function exportInventory() {
     // With cards ticked or the list filtered: which of them
     let part = 'all';
     if (selected.size || shown.length !== inventory.length) {
+        // Short labels: three buttons share the dialog's one row
         part = await choiceDialog({title: `Export for ${label}`, message: 'Which cards go into the file?', choices: [
-            {label: `Everything (${entriesText(inventory.length)})`, value: 'all'},
-            ...(shown.length !== inventory.length ? [{label: `The ${shown.length} shown`, value: 'shown', style: selected.size ? undefined : 'primary'}] : []),
-            ...(selected.size ? [{label: `The ${selected.size} selected`, value: 'selected', style: 'primary'}] : [])]});
+            {label: `All ${inventory.length.toLocaleString()}`, value: 'all'},
+            ...(shown.length !== inventory.length ? [{label: `${shown.length.toLocaleString()} shown`, value: 'shown', style: selected.size ? undefined : 'primary'}] : []),
+            ...(selected.size ? [{label: `${selected.size.toLocaleString()} selected`, value: 'selected', style: 'primary'}] : [])]});
         if (!part) return;
     }
     const link = document.createElement('a');
