@@ -40,6 +40,7 @@ class Desk:
         # when the card is found by a manual search after the AI couldn't identify it
         self.pending_capture = None
         self.processing = 0                 # captures being identified (shown on its page)
+        self.last_capture = None            # file name (in scanned_cards/) of the picture a camera-less station sent last
 
     @property
     def room(self):
@@ -52,6 +53,7 @@ class Desk:
 services.default_desk = Desk()
 desks = {}            # station id -> Desk
 desks_lock = threading.RLock()
+GENERAL_ROOM = 'general'  # pages that show no station (collection, decks, settings): log lines no station owns
 page_stations = {}    # Socket.IO session of a scanner page -> the station it shows
 current = threading.local()  # .desk: set by in_desk for work outside a page's request
 
@@ -152,9 +154,11 @@ def log_to_client(message, level="info"):
     else:
         logger.info(message)
 
-    # Send to web client via SocketIO
-    emit_desk('log', {
+    # Send to web client via SocketIO. A station's page gets only its own lines: what no station
+    # owns (backups, card data, the collection, startup) goes to the pages that show no station,
+    # not to every station's Activity tab
+    socketio.emit('log', {
         'timestamp': timestamp,
         'level': level,
         'message': message
-    })
+    }, namespace='/', to=desk().room or GENERAL_ROOM)

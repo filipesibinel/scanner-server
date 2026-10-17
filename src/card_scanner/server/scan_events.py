@@ -11,7 +11,7 @@ from card_scanner.core.review import REVIEW_DIR
 
 from card_scanner.server.state import app, database, inventory, maintenance_barrier, review, scan_inventory, socketio, stations
 from card_scanner.server.logs import logger
-from card_scanner.server.desks import desk, desk_for, emit_desk, log_to_client, page_stations, scanner
+from card_scanner.server.desks import GENERAL_ROOM, desk, desk_for, emit_desk, log_to_client, page_stations, scanner
 from card_scanner.server.captures import added_payload, scan_location, scan_stats, set_pending_capture, start_price_update
 from card_scanner.server.stations_api import undo_station_add
 
@@ -24,6 +24,8 @@ def handle_connect():
     if target is not None:
         page_stations[request.sid] = station_id
         join_room(target.room)
+    else:
+        join_room(GENERAL_ROOM)
     logger.info(f"Client connected to SocketIO{' for station ' + station_id if target else ''}")
     emit('log', {
         'timestamp': datetime.now().strftime('%H:%M:%S'),
