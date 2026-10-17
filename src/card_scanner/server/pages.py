@@ -2,9 +2,10 @@
 # FILE: server/pages.py
 # The pages themselves, the camera's live view, thumbnails and the header's numbers.
 # ============================================================================
-from flask import Response, abort, jsonify, render_template, send_from_directory
+from flask import Response, abort, jsonify, render_template, send_from_directory, url_for
 import time
 
+from card_scanner.config import Config
 from card_scanner import games
 
 from card_scanner.server.state import app, database, inventory, review, stations
@@ -86,6 +87,19 @@ def capture_thumbnail(name):
     """Thumbnail of a capture kept with an inventory entry"""
     from card_scanner.core.inventory import CAPTURES_DIR
     return send_from_directory(CAPTURES_DIR, name, max_age=86400)
+
+
+@app.route('/capture_images/<path:name>')
+def capture_image(name):
+    """A picture a station sent (the scanner page of a camera-less station shows the last one)"""
+    return send_from_directory(Config.IMAGES_DIR, name, max_age=3600)
+
+
+@app.route('/api/last_capture')
+def last_capture():
+    """The picture the current desk's station sent last ({'url': None} when none since the server started)"""
+    name = desk().last_capture
+    return jsonify({'url': url_for('capture_image', name=name) if name else None})
 
 
 @app.route('/video_feed')

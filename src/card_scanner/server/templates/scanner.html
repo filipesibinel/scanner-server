@@ -9,7 +9,7 @@
     {# Socket.IO's client, served from here and not from its CDN: the pages work on a network
        without the internet. The version is in the file's name, so a new one needs no ?v= #}
     <script src="{{ url_for('static', filename='js/vendor/socket.io-4.5.4.min.js') }}"></script>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=54">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=55">
 </head>
 <body>
     {% include '_icons.html' %}
@@ -23,10 +23,13 @@
         <div class="main-content">
             <div class="column">
                     {% if station and not station.camera %}
-                <!-- A station that only sends captured cards (a phone): no live view to show or control -->
+                <!-- A station that only sends captured cards (a phone): no live view - the card it sent last instead -->
                 <section class="panel">
                     <h2 class="section-title"><svg class="icon"><use href="#i-camera"/></svg> {{ station.name }}</h2>
-                    <div class="hint">This station captures cards itself and sends them here - there is no live view. Its cards, its review queue and its activity are on this page.</div>
+                    <div class="last-capture" id="last-capture">
+                        <img id="last-capture-image" alt="Last card captured" hidden>
+                        <span class="last-capture-empty" id="last-capture-empty">No live view: this station captures cards itself. The card it sends appears here.</span>
+                    </div>
                 </section>
                 {% endif %}
                 <section class="panel video-section" {{ 'style="display: none"'|safe if station and not station.camera }}>
@@ -218,6 +221,6 @@
 
     <script src="{{ url_for('static', filename='js/audio.js') }}?v=30"></script>
     <script src="{{ url_for('static', filename='js/common.js') }}?v=21"></script>
-    <script src="{{ url_for('static', filename='js/scanner.js') }}?v=68"></script>
+    <script src="{{ url_for('static', filename='js/scanner.js') }}?v=69"></script>
 </body>
 </html>

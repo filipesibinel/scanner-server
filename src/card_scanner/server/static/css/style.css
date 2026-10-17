@@ -447,6 +447,30 @@ a {
     display: block;
 }
 
+/* Where a camera-less station's live view would be: the card it sent last */
+.last-capture {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 160px;
+    border-radius: var(--radius);
+    background: #000;
+    overflow: hidden;
+}
+
+.last-capture img {
+    max-width: 100%;
+    max-height: min(62vh, 620px);
+    object-fit: contain;
+    display: block;
+}
+
+.last-capture-empty {
+    padding: 24px;
+    color: #aaa;
+    text-align: center;
+}
+
 /* Shown instead of the image while there is no camera */
 .camera-missing {
     position: absolute;

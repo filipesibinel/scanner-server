@@ -285,6 +285,13 @@
    "update_inventory_card"
   ],
   [
+   "/api/last_capture",
+   [
+    "GET"
+   ],
+   "last_capture"
+  ],
+  [
    "/api/local_ai_models",
    [
     "GET"
@@ -491,6 +498,13 @@
     "GET"
    ],
    "trade_export"
+  ],
+  [
+   "/capture_images/<path:name>",
+   [
+    "GET"
+   ],
+   "capture_image"
   ],
   [
    "/captures/<path:name>",

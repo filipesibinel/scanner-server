@@ -45,10 +45,26 @@ function setButton(id, text, disabled = false) {
 socket.on('connect', function() {
     audioManager.ensureAudioContext();
     loadStats();
+    if (STATION && !STATION.camera) {
+        fetch('/api/last_capture').then(r => r.json()).then(d => showLastCapture(d.url)).catch(() => {});
+    }
     // The server closes a review when its page disconnects: open it again
     if (reviewItem) openReview();
     startDetectionPolling();
     loadScanSettings();
+});
+
+// A camera-less station (a phone) has no live view: its page shows the card it sent last
+function showLastCapture(url) {
+    const image = document.getElementById('last-capture-image');
+    if (!image || !url) return;
+    image.src = url;
+    image.hidden = false;
+    document.getElementById('last-capture-empty').hidden = true;
+}
+
+socket.on('capture_received', function(data) {
+    showLastCapture(data.url);
 });
 
 socket.on('log', function(data) {
